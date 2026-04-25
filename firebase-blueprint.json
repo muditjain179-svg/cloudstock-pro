@@ -1,0 +1,113 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account details including role",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "salesman"] }
+      },
+      "required": ["email", "role"]
+    },
+    "Item": {
+      "title": "Inventory Item",
+      "description": "Product catalog and main stock level",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "brand": { "type": "string" },
+        "openingBalance": { "type": "number" },
+        "mainStock": { "type": "number" }
+      },
+      "required": ["name", "openingBalance", "mainStock"]
+    },
+    "SalesmanInventory": {
+      "title": "Salesman Stock",
+      "description": "Stock held by a specific salesman for an item",
+      "type": "object",
+      "properties": {
+        "itemId": { "type": "string" },
+        "quantity": { "type": "number" }
+      },
+      "required": ["itemId", "quantity"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Customer library for sales",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "phone": { "type": "string" }
+      },
+      "required": ["name", "phone"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Supplier library for purchases",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "phone": { "type": "string" }
+      },
+      "required": ["name", "phone"]
+    },
+    "Bill": {
+      "title": "Transaction Bill",
+      "description": "Records of sales, purchases, or transfers",
+      "type": "object",
+      "properties": {
+        "billNumber": { "type": "string" },
+        "type": { "type": "string", "enum": ["sale", "purchase", "transfer"] },
+        "date": { "type": "string", "format": "date-time" },
+        "entityId": { "type": "string" },
+        "entityName": { "type": "string" },
+        "entityPhone": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "itemId": { "type": "string" },
+              "name": { "type": "string" },
+              "quantity": { "type": "number" },
+              "price": { "type": "number" }
+            }
+          }
+        },
+        "totalAmount": { "type": "number" },
+        "createdBy": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "finalized"] }
+      },
+      "required": ["billNumber", "type", "date", "items", "createdBy"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles and roles"
+    },
+    "/items/{itemId}": {
+      "schema": "Item",
+      "description": "Global item catalog and main inventory"
+    },
+    "/inventories/{salesmanId}/items/{itemId}": {
+      "schema": "SalesmanInventory",
+      "description": "Salesman-wise stock tracking"
+    },
+    "/customers/{customerId}": {
+      "schema": "Customer",
+      "description": "Customer list"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": "Supplier",
+      "description": "Supplier list"
+    },
+    "/bills/{billId}": {
+      "schema": "Bill",
+      "description": "Sales, purchases, and transfer history"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "appId": "com.cloudstock.inventory",
+  "appName": "CloudStock Pro",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  }
+}

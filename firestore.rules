@@ -1,0 +1,134 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function verified() { return true; }
+    function isStaticAdmin() { return isSignedIn() && request.auth.token.email == 'muditjain179@gmail.com'; }
+
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    
+    // Role Helpers
+    // isAdmin MUST NOT be used in "allow list" blocks as it contains a get() call.
+    function isAdmin() { 
+      return isStaticAdmin() || (isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'); 
+    }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+
+    // --- Validation Helpers ---
+    
+    function isValidItem(data) {
+      return data.keys().hasAll(['name', 'category', 'brand', 'openingBalance', 'mainStock']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.category is string && data.category.size() <= 100 &&
+             data.brand is string && data.brand.size() <= 100 &&
+             data.openingBalance is number &&
+             data.mainStock is number &&
+             (!('lowStockThreshold' in data) || data.lowStockThreshold is number);
+    }
+
+    function isValidCustomer(data) {
+      return data.keys().hasAll(['name', 'phone']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.phone is string && data.phone.size() >= 8 && data.phone.size() <= 25;
+    }
+
+    function isValidSupplier(data) {
+      return data.keys().hasAll(['name', 'phone']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.phone is string && data.phone.size() >= 10 && data.phone.size() <= 20;
+    }
+
+    function isValidInventoryItem(data) {
+      return data.quantity is number;
+    }
+
+    function isValidBill(data) {
+      return data.billNumber is string && data.billNumber.size() > 0 &&
+             data.type in ['sale', 'purchase', 'transfer'] &&
+             data.date is timestamp &&
+             data.items is list &&
+             data.createdBy == request.auth.uid &&
+             data.status in ['draft', 'finalized'] &&
+             (!('totalAmount' in data) || data.totalAmount is number);
+    }
+
+    function isValidName(data) {
+      return data.keys().hasAll(['name']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100;
+    }
+
+    // --- Rules ---
+
+    match /users/{userId} {
+      // PII Pillar: only owner or admin can read full profile
+      allow get: if isOwner(userId) || isAdmin();
+      // List Pillar: admin can list all users
+      allow list: if isAdmin();
+      
+      allow create: if (isOwner(userId) || isAdmin()) && 
+        incoming().role in ['admin', 'salesman'];
+        
+      allow update: if isAdmin() || (isOwner(userId) && incoming().role == existing().role);
+        
+      allow delete: if isAdmin();
+    }
+
+    match /brands/{brandId} {
+      allow read: if isSignedIn();
+      allow create, update: if isAdmin() && isValidName(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /categories/{categoryId} {
+      allow read: if isSignedIn();
+      allow create, update: if isAdmin() && isValidName(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /items/{itemId} {
+      allow read: if isSignedIn();
+      allow create, update: if isAdmin() && isValidItem(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /inventories/{salesmanId}/items/{itemId} {
+      allow read: if isOwner(salesmanId) || isAdmin();
+      allow create, update: if (isOwner(salesmanId) || isAdmin()) && isValidInventoryItem(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /customers/{customerId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidCustomer(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /suppliers/{supplierId} {
+      allow read: if isAdmin();
+      allow create, update: if isAdmin() && isValidSupplier(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /bills/{billId} {
+      // Split get and list
+      allow get: if isSignedIn() && (isAdmin() || existing().createdBy == request.auth.uid);
+      allow list: if isSignedIn() && (isAdmin() || resource.data.createdBy == request.auth.uid);
+      
+      allow create: if isSignedIn() && isValidBill(incoming()) && (
+        (incoming().type == 'purchase' && isAdmin()) ||
+        (incoming().type == 'sale') ||
+        (incoming().type == 'transfer' && isAdmin())
+      );
+      allow update: if isSignedIn() && (isAdmin() || existing().createdBy == request.auth.uid) && existing().status == 'draft' && isValidBill(incoming());
+      allow delete: if isAdmin() || (isSignedIn() && existing().createdBy == request.auth.uid);
+    }
+  }
+}
