@@ -33,7 +33,7 @@ import {
   Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { formatCurrency, generatePDF, generateWhatsAppLink, cn } from '../lib/utils';
+import { formatCurrency, generateInvoicePDF, generateWhatsAppLink, cn } from '../lib/utils';
 
 const Purchases: React.FC = () => {
   const { user } = useAuth();
@@ -54,6 +54,7 @@ const Purchases: React.FC = () => {
   const [showFinalizeOverlay, setShowFinalizeOverlay] = useState(false);
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [lastFinalizedBill, setLastFinalizedBill] = useState<Bill | null>(null);
+  const [supplierSearch, setSupplierSearch] = useState('');
 
   // Bill Form State
   const [billData, setBillData] = useState<{
@@ -69,6 +70,11 @@ const Purchases: React.FC = () => {
     receivedAmount: 0,
     status: 'draft'
   });
+
+  const filteredSuppliers = suppliers.filter(s => 
+    s.name.toLowerCase().includes(supplierSearch.toLowerCase()) || 
+    (s.phone && s.phone.includes(supplierSearch))
+  );
 
   useEffect(() => {
     if (user?.role !== 'admin') return;
@@ -132,16 +138,24 @@ const Purchases: React.FC = () => {
     if (status === 'finalized' && !showFinalizeOverlay) {
       setIsSaving(true);
       try {
-        const columns = ['Item', 'Qty', 'Cost', 'Subtotal'];
-        const rows = billData.items.map(i => [i.name, i.quantity, formatCurrency(i.price), formatCurrency(i.quantity * i.price)]);
-        const summary = [
-          { label: 'Subtotal Cost', value: formatCurrency(calculateSubtotal()) },
-          { label: 'Old Balance', value: formatCurrency(billData.oldDue) },
-          { label: 'Grand Total', value: formatCurrency(calculateGrandTotal()) },
-          { label: 'Paid Amount', value: formatCurrency(billData.receivedAmount) },
-          { label: 'Pending Balance', value: formatCurrency(calculateNewBalance()) },
-        ];
-        const blob = await generatePDF(`Purchase Order (Preview)`, columns, rows, 'preview.pdf', summary);
+        const blob = await generateInvoicePDF({
+          title: 'PURCHASE ORDER',
+          themeColor: '#2563eb', // Blue theme
+          salesman_name: user?.name || 'Admin',
+          date_issued: new Date().toLocaleDateString(),
+          invoice_no: 'DRAFT',
+          customer_name: billData.supplier!.name,
+          items: billData.items.map(i => ({
+            item_name: i.name,
+            rate: i.price,
+            qty: i.quantity,
+            subtotal: i.price * i.quantity
+          })),
+          total_amount: calculateSubtotal(),
+          old_due: billData.oldDue,
+          receipt_amount: billData.receivedAmount,
+          new_balance: calculateNewBalance()
+        });
         const url = URL.createObjectURL(blob);
         setPdfPreviewUrl(url);
         setShowFinalizeOverlay(true);
@@ -200,16 +214,24 @@ const Purchases: React.FC = () => {
       });
 
       if (status === 'finalized') {
-        const columns = ['Item', 'Qty', 'Cost', 'Subtotal'];
-        const rows = billData.items.map(i => [i.name, i.quantity, formatCurrency(i.price), formatCurrency(i.quantity * i.price)]);
-        const summary = [
-          { label: 'Subtotal Cost', value: formatCurrency(calculateSubtotal()) },
-          { label: 'Old Balance', value: formatCurrency(billData.oldDue) },
-          { label: 'Grand Total', value: formatCurrency(calculateGrandTotal()) },
-          { label: 'Paid Amount', value: formatCurrency(billData.receivedAmount) },
-          { label: 'Pending Balance', value: formatCurrency(calculateNewBalance()) },
-        ];
-        const blob = await generatePDF(`Purchase Order #${createdBill!.billNumber}`, columns, rows, `PO_${createdBill!.billNumber}.pdf`, summary);
+        const blob = await generateInvoicePDF({
+          title: 'PURCHASE ORDER',
+          themeColor: '#2563eb',
+          salesman_name: user?.name || 'Admin',
+          date_issued: new Date(createdBill!.date.seconds * 1000).toLocaleDateString(),
+          invoice_no: createdBill!.billNumber,
+          customer_name: createdBill!.entityName,
+          items: createdBill!.items.map(i => ({
+            item_name: i.name,
+            rate: i.price,
+            qty: i.quantity,
+            subtotal: i.price * i.quantity
+          })),
+          total_amount: createdBill!.subtotal,
+          old_due: createdBill!.oldDue,
+          receipt_amount: createdBill!.receivedAmount,
+          new_balance: createdBill!.newBalance
+        });
         setPdfPreviewUrl(URL.createObjectURL(blob));
         setLastFinalizedBill(createdBill);
       } else {
@@ -226,17 +248,24 @@ const Purchases: React.FC = () => {
   const shareBillOnWhatsApp = async (bill: Bill) => {
     const message = `*Purchase Order #${bill.billNumber}*\n\nSupplier: ${bill.entityName}\nDate: ${new Date(bill.date.seconds * 1000).toLocaleDateString()}\n\n*Total Cost: ${formatCurrency(bill.totalAmount)}*\nPending Balance: ${formatCurrency(bill.newBalance || 0)}`;
     
-    const columns = ['Item', 'Qty', 'Cost', 'Subtotal'];
-    const rows = bill.items.map(i => [i.name, i.quantity, formatCurrency(i.price), formatCurrency(i.quantity * i.price)]);
-    const summary = [
-      { label: 'Subtotal', value: formatCurrency(bill.subtotal || 0) },
-      { label: 'Old Due', value: formatCurrency(bill.oldDue || 0) },
-      { label: 'Total', value: formatCurrency(bill.totalAmount) },
-      { label: 'Paid', value: formatCurrency(bill.receivedAmount || 0) },
-      { label: 'Balance', value: formatCurrency(bill.newBalance || 0) },
-    ];
-    
-    const blob = await generatePDF(`Purchase Order #${bill.billNumber}`, columns, rows, `PO_${bill.billNumber}.pdf`, summary);
+    const blob = await generateInvoicePDF({
+      title: 'PURCHASE ORDER',
+      themeColor: '#2563eb',
+      salesman_name: user?.name || 'Admin',
+      date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
+      invoice_no: bill.billNumber,
+      customer_name: bill.entityName,
+      items: bill.items.map(i => ({
+        item_name: i.name,
+        rate: i.price,
+        qty: i.quantity,
+        subtotal: i.price * i.quantity
+      })),
+      total_amount: bill.subtotal || 0,
+      old_due: bill.oldDue || 0,
+      receipt_amount: bill.receivedAmount || 0,
+      new_balance: bill.newBalance || 0
+    });
 
     if (navigator.share) {
       const file = new File([blob], `PO_${bill.billNumber}.pdf`, { type: 'application/pdf' });
@@ -320,25 +349,37 @@ const Purchases: React.FC = () => {
                 <User className="w-5 h-5 text-indigo-500" />
                 Select Supplier
               </h2>
-              <div className="flex flex-col sm:flex-row gap-3">
-                <select 
-                  className="flex-1 p-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
-                  value={billData.supplier?.id || ''}
-                  onChange={(e) => {
-                    const s = suppliers.find(s => s.id === e.target.value);
-                    if (s) setBillData({ ...billData, supplier: s });
-                  }}
-                >
-                  <option value="">Select a supplier</option>
-                  {suppliers.map(s => <option key={s.id} value={s.id}>{s.name} ({s.phone})</option>)}
-                </select>
-                <button 
-                  onClick={() => setSupplierModalOpen(true)}
-                  className="px-4 py-3 bg-indigo-50 text-indigo-600 rounded-xl font-bold flex items-center gap-2 hover:bg-indigo-100 transition-colors"
-                >
-                  <UserPlus className="w-4 h-4" />
-                  NEW
-                </button>
+              <div className="space-y-3">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search by name or phone..."
+                    className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none text-sm transition-all"
+                    value={supplierSearch}
+                    onChange={(e) => setSupplierSearch(e.target.value)}
+                  />
+                </div>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <select 
+                    className="flex-1 p-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
+                    value={billData.supplier?.id || ''}
+                    onChange={(e) => {
+                      const s = suppliers.find(s => s.id === e.target.value);
+                      if (s) setBillData({ ...billData, supplier: s });
+                    }}
+                  >
+                    <option value="">{filteredSuppliers.length === 0 ? 'No suppliers found' : 'Select a supplier'}</option>
+                    {filteredSuppliers.map(s => <option key={s.id} value={s.id}>{s.name} ({s.phone})</option>)}
+                  </select>
+                  <button 
+                    onClick={() => setSupplierModalOpen(true)}
+                    className="px-4 py-3 bg-indigo-50 text-indigo-600 rounded-xl font-bold flex items-center gap-2 hover:bg-indigo-100 transition-colors"
+                  >
+                    <UserPlus className="w-4 h-4" />
+                    NEW
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -650,34 +691,34 @@ const Purchases: React.FC = () => {
                     </div>
                   </>
                 ) : (
-                  <div className="p-12 text-center space-y-8">
-                    <div className="w-24 h-24 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-6">
-                      <CheckCircle2 className="w-12 h-12" />
+                  <div className="flex-1 overflow-y-auto p-6 sm:p-12 text-center space-y-6 sm:space-y-8">
+                    <div className="w-16 h-16 sm:w-24 sm:h-24 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-2 sm:mb-6">
+                      <CheckCircle2 className="w-8 h-8 sm:w-12 sm:h-12" />
                     </div>
                     <div>
-                      <h2 className="text-3xl font-black text-slate-900 tracking-tight mb-2 text-emerald-600 uppercase">Purchase Complete!</h2>
-                      <p className="text-slate-500 font-bold uppercase tracking-widest text-xs">Purchase Order #{lastFinalizedBill.billNumber} Recorded</p>
+                      <h2 className="text-xl sm:text-3xl font-black text-slate-900 tracking-tight mb-2 text-emerald-600 uppercase">Purchase Complete!</h2>
+                      <p className="text-slate-500 font-bold uppercase tracking-widest text-[10px] sm:text-xs">Purchase Order #{lastFinalizedBill.billNumber} Recorded</p>
                     </div>
 
-                    <div className="bg-slate-50 border border-slate-200 rounded-3xl p-6 max-h-[40vh] overflow-hidden shadow-inner">
+                    <div className="bg-slate-50 border border-slate-200 rounded-2xl sm:rounded-3xl p-4 sm:p-6 h-[40vh] sm:h-[40vh] overflow-hidden shadow-inner">
                        <iframe 
                             src={pdfPreviewUrl!} 
-                            className="w-full h-full min-h-[300px] border-none rounded-xl"
+                            className="w-full h-full border-none rounded-xl"
                             title="Finalized Bill"
                           />
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4 max-w-md mx-auto">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 max-w-md mx-auto">
                        <button 
                         onClick={() => shareBillOnWhatsApp(lastFinalizedBill)}
-                        className="py-4 bg-emerald-600 text-white font-bold rounded-2xl hover:bg-emerald-700 shadow-xl shadow-emerald-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-xs"
+                        className="py-3 sm:py-4 bg-emerald-600 text-white font-bold rounded-2xl hover:bg-emerald-700 shadow-xl shadow-emerald-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs"
                       >
-                        <Send className="w-5 h-5" />
+                        <Send className="w-4 h-4 sm:w-5 h-5" />
                         Share Bill
                       </button>
                       <button 
                         onClick={() => { setIsCreating(false); setBillData({ supplier: null, items: [], oldDue: 0, receivedAmount: 0, status: 'draft' }); setShowFinalizeOverlay(false); setLastFinalizedBill(null); }}
-                        className="py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-black transition-all uppercase tracking-widest text-xs"
+                        className="py-3 sm:py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-black transition-all uppercase tracking-widest text-[10px] sm:text-xs"
                       >
                         Finish
                       </button>
@@ -710,62 +751,72 @@ const Purchases: React.FC = () => {
 
       <div className="grid grid-cols-1 gap-4">
         {bills.map(bill => (
-          <div key={bill.id} className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col md:flex-row items-center justify-between group hover:border-blue-200 transition-all">
-            <div className="flex items-center gap-4 mb-4 md:mb-0">
+          <div key={bill.id} className="bg-white p-4 sm:p-5 rounded-xl border border-gray-100 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between group gap-4 transition-all hover:border-blue-200">
+            <div className="flex items-center gap-3 sm:gap-4 w-full sm:w-auto">
               <div className={cn(
-                "w-10 h-10 rounded-lg flex items-center justify-center shadow-inner",
-                bill.status === 'finalized' ? "bg-green-100 text-green-600" : "bg-blue-100 text-blue-600"
+                "w-10 h-10 sm:w-12 sm:h-12 rounded-lg sm:rounded-xl flex items-center justify-center shadow-inner shrink-0",
+                bill.status === 'finalized' ? "bg-emerald-50 text-emerald-600" : "bg-blue-50 text-blue-600"
               )}>
-                <ShoppingBag className="w-5 h-5" />
+                <ShoppingBag className="w-5 h-5 sm:w-6 sm:h-6" />
               </div>
-              <div>
-                <h3 className="font-bold text-gray-900 flex items-center gap-2 tracking-tight">
+              <div className="min-w-0 flex-1 sm:flex-initial">
+                <h3 className="font-bold text-gray-900 flex items-center gap-2 tracking-tight truncate">
                   #{bill.billNumber}
                   <span className={cn(
-                    "text-[9px] uppercase px-2 py-0.5 rounded-full font-bold",
-                    bill.status === 'finalized' ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"
+                    "text-[8px] sm:text-[9px] uppercase px-2 py-0.5 rounded-full font-bold shrink-0",
+                    bill.status === 'finalized' ? "bg-emerald-100 text-emerald-700" : "bg-blue-100 text-blue-700"
                   )}>
                     {bill.status}
                   </span>
                 </h3>
-                <p className="text-xs text-gray-500 uppercase font-medium">{bill.entityName} • {new Date(bill.date.seconds * 1000).toLocaleDateString()}</p>
+                <p className="text-[10px] sm:text-xs text-gray-500 uppercase font-black tracking-widest truncate leading-tight">{bill.entityName} • {new Date(bill.date.seconds * 1000).toLocaleDateString()}</p>
               </div>
             </div>
 
-            <div className="flex items-center gap-6">
-              <div className="text-right">
-                <p className="text-[10px] text-gray-400 font-bold uppercase mb-0.5 tracking-tighter">Amount</p>
-                <p className="text-lg font-bold text-gray-900 tracking-tighter">{formatCurrency(bill.totalAmount)}</p>
+            <div className="flex items-center justify-between sm:justify-end gap-3 sm:gap-6 w-full sm:w-auto pt-3 sm:pt-0 border-t sm:border-0 border-slate-50">
+              <div className="text-left sm:text-right">
+                <p className="text-[8px] sm:text-[10px] text-gray-400 font-bold uppercase mb-0.5 tracking-tighter shrink-0">Amount</p>
+                <p className="text-base sm:text-lg font-bold text-gray-900 tracking-tighter whitespace-nowrap leading-none">{formatCurrency(bill.totalAmount)}</p>
               </div>
               <div className="flex gap-2">
                  <button 
                   onClick={() => shareBillOnWhatsApp(bill)}
-                  className="flex items-center gap-2 px-3 py-2 bg-emerald-50 text-emerald-600 rounded-lg text-[10px] font-black uppercase tracking-tight hover:bg-emerald-100 transition-all border border-emerald-100"
+                  className="flex items-center gap-1.5 px-2 sm:px-3 py-2 bg-emerald-50 text-emerald-600 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-tight hover:bg-emerald-100 transition-all border border-emerald-100 shrink-0"
                   title="Share Receipt"
                 >
-                  <Send className="w-4 h-4" />
+                  <Send className="w-3.5 h-3.5" />
+                  <span className="hidden xs:inline">SHARE</span>
                 </button>
                 <button 
                   onClick={async () => { 
-                    const columns = ['Item', 'Qty', 'Price', 'Subtotal'];
-                    const rows = bill.items.map(i => [i.name, i.quantity, formatCurrency(i.price), formatCurrency(i.quantity * i.price)]);
-                    const summary = [
-                      { label: 'Subtotal', value: formatCurrency(bill.subtotal || 0) },
-                      { label: 'Old Bal', value: formatCurrency(bill.oldDue || 0) },
-                      { label: 'Total', value: formatCurrency(bill.totalAmount) },
-                      { label: 'Paid', value: formatCurrency(bill.receivedAmount || 0) },
-                      { label: 'Pending', value: formatCurrency(bill.newBalance || 0) },
-                    ];
-                    const blob = await generatePDF(`Purchase Order #${bill.billNumber}`, columns, rows, `PO_${bill.billNumber}.pdf`, summary);
+                    const blob = await generateInvoicePDF({
+                      title: 'PURCHASE ORDER',
+                      themeColor: '#2563eb',
+                      salesman_name: user?.name || 'Admin',
+                      date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
+                      invoice_no: bill.billNumber,
+                      customer_name: bill.entityName,
+                      items: bill.items.map(i => ({
+                        item_name: i.name,
+                        rate: i.price,
+                        qty: i.quantity,
+                        subtotal: i.price * i.quantity
+                      })),
+                      total_amount: bill.subtotal || 0,
+                      old_due: bill.oldDue || 0,
+                      receipt_amount: bill.receivedAmount || 0,
+                      new_balance: bill.newBalance || 0
+                    });
                     const link = document.createElement('a');
                     link.href = URL.createObjectURL(blob);
                     link.download = `PO_${bill.billNumber}.pdf`;
                     link.click();
                   }}
-                  className="flex items-center gap-2 px-3 py-2 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-black uppercase tracking-tight hover:bg-blue-100 transition-all border border-blue-100"
+                  className="flex items-center gap-1.5 px-2 sm:px-3 py-2 bg-blue-50 text-blue-600 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-tight hover:bg-blue-100 transition-all border border-blue-100 shrink-0"
                   title="Download Record"
                 >
-                  <Download className="w-4 h-4" />
+                  <Download className="w-3.5 h-3.5" />
+                  <span className="hidden xs:inline">DOWNLOAD</span>
                 </button>
                 <button 
                   onClick={() => handleDeleteBill(bill)}

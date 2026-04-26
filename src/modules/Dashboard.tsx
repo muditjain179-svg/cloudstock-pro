@@ -85,9 +85,21 @@ const Dashboard: React.FC = () => {
     // Aggregate Stats (Sales)
     const fetchSales = async () => {
       try {
+        const startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+
         const salesQ = user.role === 'admin'
-          ? query(collection(db, 'bills'), where('type', '==', 'sale'), limit(100))
-          : query(collection(db, 'bills'), where('type', '==', 'sale'), where('createdBy', '==', user.id), limit(100));
+          ? query(
+              collection(db, 'bills'), 
+              where('type', '==', 'sale'), 
+              where('date', '>=', startOfToday)
+            )
+          : query(
+              collection(db, 'bills'), 
+              where('type', '==', 'sale'), 
+              where('createdBy', '==', user.id), 
+              where('date', '>=', startOfToday)
+            );
           
         const salesSnapshot = await getDocs(salesQ);
         const totalSales = salesSnapshot.docs.reduce((sum, doc) => {
@@ -145,7 +157,14 @@ const Dashboard: React.FC = () => {
                   transition={{ delay: i * 0.1 }}
                   className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm"
                 >
-                  <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1">{card.label}</p>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{card.label}</p>
+                    {card.label === 'Total Revenue' && (
+                      <span className="text-[7px] sm:text-[8px] text-emerald-600 font-black uppercase tracking-tighter bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">
+                        Resets Daily
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center justify-between">
                     <p className="text-2xl font-bold text-gray-900">
                       {card.label.includes('Revenue') ? formatCurrency(card.value) : card.value} 

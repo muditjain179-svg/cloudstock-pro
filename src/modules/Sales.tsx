@@ -33,7 +33,7 @@ import {
   Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { formatCurrency, generatePDF, generateSNTCPDF, generateWhatsAppLink, cn } from '../lib/utils';
+import { formatCurrency, generateInvoicePDF, generateWhatsAppLink, cn } from '../lib/utils';
 
 const Sales: React.FC = () => {
   const { user } = useAuth();
@@ -53,6 +53,7 @@ const Sales: React.FC = () => {
   const [showFinalizeOverlay, setShowFinalizeOverlay] = useState(false);
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [lastFinalizedBill, setLastFinalizedBill] = useState<Bill | null>(null);
+  const [customerSearch, setCustomerSearch] = useState('');
 
   // Bill Form State
   const [billData, setBillData] = useState<{
@@ -68,6 +69,11 @@ const Sales: React.FC = () => {
     receivedAmount: 0,
     status: 'draft'
   });
+
+  const filteredCustomers = customers.filter(c => 
+    c.name.toLowerCase().includes(customerSearch.toLowerCase()) || 
+    (c.phone && c.phone.includes(customerSearch))
+  );
 
   useEffect(() => {
     if (!user) return;
@@ -152,7 +158,9 @@ const Sales: React.FC = () => {
         const grandTotal = calculateGrandTotal();
         const newBalance = calculateNewBalance();
         
-        const blob = await generateSNTCPDF({
+        const blob = await generateInvoicePDF({
+          title: 'CLOUDSTOCK PRO',
+          themeColor: '#d32f2f',
           salesman_name: user?.name || 'Staff',
           date_issued: new Date().toLocaleDateString(),
           invoice_no: 'DRAFT',
@@ -238,7 +246,9 @@ const Sales: React.FC = () => {
       if (status === 'finalized' && createdBill) {
         setLastFinalizedBill(createdBill);
         
-        const blob = await generateSNTCPDF({
+        const blob = await generateInvoicePDF({
+          title: 'CLOUDSTOCK PRO',
+          themeColor: '#d32f2f',
           salesman_name: user?.name || 'Staff',
           date_issued: new Date(createdBill.date.seconds * 1000).toLocaleDateString(),
           invoice_no: createdBill.billNumber,
@@ -286,7 +296,9 @@ const Sales: React.FC = () => {
     const message = `*Bill #${bill.billNumber}*\n\nCustomer: ${bill.entityName}\nDate: ${new Date(bill.date.seconds * 1000).toLocaleDateString()}\n\nItems:\n${itemsText}\n\nSubtotal: ${formatCurrency(bill.subtotal || 0)}\nOld Due: ${formatCurrency(bill.oldDue || 0)}\n*Grand Total: ${formatCurrency(bill.totalAmount)}*\nReceived: ${formatCurrency(bill.receivedAmount || 0)}\n*New Balance: ${formatCurrency(bill.newBalance || 0)}*`;
     
     // Generate PDF Blob
-    const pdfBlob = await generateSNTCPDF({
+    const pdfBlob = await generateInvoicePDF({
+      title: 'CLOUDSTOCK PRO',
+      themeColor: '#d32f2f',
       salesman_name: user?.name || 'Staff',
       date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
       invoice_no: bill.billNumber,
@@ -398,25 +410,37 @@ const Sales: React.FC = () => {
                 <User className="w-5 h-5 text-indigo-500" />
                 Select Customer
               </h2>
-              <div className="flex flex-col sm:flex-row gap-3">
-                <select 
-                  className="flex-1 p-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
-                  value={billData.customer?.id || ''}
-                  onChange={(e) => {
-                    const c = customers.find(c => c.id === e.target.value);
-                    if (c) setBillData({ ...billData, customer: c });
-                  }}
-                >
-                  <option value="">Select a customer</option>
-                  {customers.map(c => <option key={c.id} value={c.id}>{c.name} ({c.phone})</option>)}
-                </select>
-                <button 
-                  onClick={() => setCustomerModalOpen(true)}
-                  className="px-4 py-3 bg-indigo-50 text-indigo-600 rounded-xl font-bold flex items-center gap-2 hover:bg-indigo-100 transition-colors"
-                >
-                  <UserPlus className="w-4 h-4" />
-                  NEW
-                </button>
+              <div className="space-y-3">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search by name or phone..."
+                    className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none text-sm transition-all"
+                    value={customerSearch}
+                    onChange={(e) => setCustomerSearch(e.target.value)}
+                  />
+                </div>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <select 
+                    className="flex-1 p-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
+                    value={billData.customer?.id || ''}
+                    onChange={(e) => {
+                      const c = customers.find(c => c.id === e.target.value);
+                      if (c) setBillData({ ...billData, customer: c });
+                    }}
+                  >
+                    <option value="">{filteredCustomers.length === 0 ? 'No customers found' : 'Select a customer'}</option>
+                    {filteredCustomers.map(c => <option key={c.id} value={c.id}>{c.name} ({c.phone})</option>)}
+                  </select>
+                  <button 
+                    onClick={() => setCustomerModalOpen(true)}
+                    className="px-4 py-3 bg-indigo-50 text-indigo-600 rounded-xl font-bold flex items-center gap-2 hover:bg-indigo-100 transition-colors"
+                  >
+                    <UserPlus className="w-4 h-4" />
+                    NEW
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -685,14 +709,14 @@ const Sales: React.FC = () => {
                 initial={{ y: 50, opacity: 0 }} 
                 animate={{ y: 0, opacity: 1 }} 
                 exit={{ y: 50, opacity: 0 }} 
-                className="bg-white w-full max-w-4xl max-h-[90vh] rounded-3xl shadow-2xl relative z-10 overflow-hidden flex flex-col"
+                className="bg-white w-full max-w-4xl max-h-[95vh] sm:max-h-[90vh] rounded-3xl shadow-2xl relative z-10 overflow-hidden flex flex-col"
               >
                 {!lastFinalizedBill ? (
                   <>
-                    <div className="p-6 border-b flex justify-between items-center">
+                    <div className="p-4 sm:p-6 border-b flex justify-between items-center">
                       <div>
                         <h2 className="text-xl font-black text-slate-900 tracking-tight">Review & Finalize Bill</h2>
-                        <p className="text-xs text-slate-500 font-bold uppercase tracking-widest">Please review the details below before completing the sale</p>
+                        <p className="text-xs text-slate-500 font-bold uppercase tracking-widest leading-tight">Please review the details below before completing the sale</p>
                       </div>
                       <button 
                         onClick={() => { setShowFinalizeOverlay(false); setPdfPreviewUrl(null); }}
@@ -701,7 +725,7 @@ const Sales: React.FC = () => {
                         <X className="w-6 h-6 text-slate-400" />
                       </button>
                     </div>
-                    <div className="flex-1 overflow-hidden p-6 bg-slate-100 flex flex-col gap-4">
+                    <div className="flex-1 overflow-hidden p-4 sm:p-6 bg-slate-100 flex flex-col gap-4">
                       <div className="bg-white rounded-2xl shadow-inner border border-slate-200 overflow-hidden flex-1 relative">
                         {pdfPreviewUrl ? (
                           <iframe 
@@ -716,17 +740,17 @@ const Sales: React.FC = () => {
                         )}
                       </div>
                     </div>
-                    <div className="p-6 border-t bg-white flex gap-3">
+                    <div className="p-4 sm:p-6 border-t bg-white flex flex-col sm:flex-row gap-3">
                       <button 
                          onClick={() => { setShowFinalizeOverlay(false); setPdfPreviewUrl(null); }}
-                         className="flex-1 py-4 border-2 border-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-50 transition-colors uppercase tracking-widest text-xs"
+                         className="flex-1 py-3 sm:py-4 border-2 border-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-50 transition-colors uppercase tracking-widest text-[10px] sm:text-xs order-2 sm:order-1"
                       >
                         Back to Edit
                       </button>
                       <button 
                         onClick={() => handleSaveBill('finalized')}
                         disabled={isSaving}
-                        className="flex-1 py-4 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-700 shadow-xl shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2 uppercase tracking-widest text-xs disabled:opacity-50"
+                        className="flex-1 py-3 sm:py-4 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-700 shadow-xl shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs disabled:opacity-50 order-1 sm:order-2"
                       >
                         {isSaving ? (
                           <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -740,16 +764,16 @@ const Sales: React.FC = () => {
                     </div>
                   </>
                 ) : (
-                  <div className="p-12 text-center space-y-8">
-                    <div className="w-24 h-24 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-6">
-                      <CheckCircle2 className="w-12 h-12" />
+                  <div className="flex-1 overflow-y-auto p-6 sm:p-12 text-center space-y-6 sm:space-y-8">
+                    <div className="w-16 h-16 sm:w-24 sm:h-24 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-2 sm:mb-6">
+                      <CheckCircle2 className="w-8 h-8 sm:w-12 sm:h-12" />
                     </div>
                     <div>
-                      <h2 className="text-3xl font-black text-slate-900 tracking-tight mb-2">Sale Finalized Successfully!</h2>
-                      <p className="text-slate-500 font-bold uppercase tracking-widest text-xs">Bill #{lastFinalizedBill.billNumber} has been recorded</p>
+                      <h2 className="text-xl sm:text-3xl font-black text-slate-900 tracking-tight mb-2">Sale Finalized Successfully!</h2>
+                      <p className="text-slate-500 font-bold uppercase tracking-widest text-[10px] sm:text-xs">Bill #{lastFinalizedBill.billNumber} has been recorded</p>
                     </div>
 
-                    <div className="bg-slate-50 border border-slate-200 rounded-3xl p-6 max-h-[40vh] overflow-hidden">
+                    <div className="bg-slate-50 border border-slate-200 rounded-2xl sm:rounded-3xl p-4 sm:p-6 h-[40vh] sm:h-[40vh] overflow-hidden">
                        <iframe 
                             src={pdfPreviewUrl!} 
                             className="w-full h-full min-h-[300px] border-none rounded-xl"
@@ -757,12 +781,12 @@ const Sales: React.FC = () => {
                           />
                     </div>
 
-                    <div className="grid grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
                        <button 
                         onClick={() => shareBillOnWhatsApp(lastFinalizedBill)}
-                        className="py-4 bg-emerald-600 text-white font-bold rounded-2xl hover:bg-emerald-700 shadow-xl shadow-emerald-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-xs"
+                        className="py-3 sm:py-4 bg-emerald-600 text-white font-bold rounded-2xl hover:bg-emerald-700 shadow-xl shadow-emerald-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs"
                       >
-                        <Send className="w-5 h-5" />
+                        <Send className="w-4 h-4 sm:w-5 h-5" />
                         Send PDF
                       </button>
                       <button 
@@ -772,9 +796,9 @@ const Sales: React.FC = () => {
                            link.download = `Invoice_${lastFinalizedBill.billNumber}.pdf`;
                            link.click();
                          }}
-                         className="py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-700 shadow-xl shadow-blue-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-xs"
+                         className="py-3 sm:py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-700 shadow-xl shadow-blue-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs"
                       >
-                        <Download className="w-5 h-5" />
+                        <Download className="w-4 h-4 sm:w-5 h-5" />
                         Download
                       </button>
                       <button 
@@ -785,9 +809,9 @@ const Sales: React.FC = () => {
                           setPdfPreviewUrl(null);
                           setBillData({ customer: null, items: [], oldDue: 0, receivedAmount: 0, status: 'draft' });
                         }}
-                        className="py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-black transition-all uppercase tracking-widest text-xs"
+                        className="py-3 sm:py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-black transition-all uppercase tracking-widest text-[10px] sm:text-xs"
                       >
-                        Done
+                        Finish
                       </button>
                     </div>
                   </div>
@@ -818,65 +842,74 @@ const Sales: React.FC = () => {
 
       <div className="grid grid-cols-1 gap-4">
         {bills.map(bill => (
-          <div key={bill.id} className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col md:flex-row items-center justify-between group">
-            <div className="flex items-center gap-4 mb-4 md:mb-0">
+          <div key={bill.id} className="bg-white p-4 sm:p-5 rounded-xl border border-gray-100 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between group gap-4 transition-all hover:border-indigo-200">
+            <div className="flex items-center gap-3 sm:gap-4 w-full sm:w-auto">
               <div className={cn(
-                "w-10 h-10 rounded-lg flex items-center justify-center",
-                bill.status === 'finalized' ? "bg-green-100 text-green-600" : "bg-blue-100 text-blue-600"
+                "w-10 h-10 sm:w-12 sm:h-12 rounded-lg sm:rounded-xl flex items-center justify-center shadow-inner shrink-0",
+                bill.status === 'finalized' ? "bg-emerald-50 text-emerald-600" : "bg-indigo-50 text-indigo-600"
               )}>
-                <FileText className="w-5 h-5" />
+                <FileText className="w-5 h-5 sm:w-6 sm:h-6" />
               </div>
-              <div>
-                <h3 className="font-bold text-gray-900 flex items-center gap-2">
+              <div className="min-w-0 flex-1 sm:flex-initial">
+                <h3 className="font-bold text-slate-900 flex items-center gap-2 tracking-tight truncate">
                   #{bill.billNumber}
                   <span className={cn(
-                    "text-[9px] uppercase px-2 py-0.5 rounded-full font-bold",
-                    bill.status === 'finalized' ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"
+                    "text-[8px] sm:text-[9px] uppercase px-2 py-0.5 rounded-full font-bold shrink-0",
+                    bill.status === 'finalized' ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
                   )}>
                     {bill.status}
                   </span>
                 </h3>
-                <p className="text-xs text-gray-500 uppercase font-medium">{bill.entityName} • {new Date(bill.date.seconds * 1000).toLocaleDateString()}</p>
+                <p className="text-[10px] sm:text-xs text-slate-500 uppercase font-black tracking-widest truncate leading-tight">{bill.entityName} • {new Date(bill.date.seconds * 1000).toLocaleDateString()}</p>
               </div>
             </div>
 
-            <div className="flex items-center gap-6">
-              <div className="text-right">
-                <p className="text-[10px] text-gray-400 font-bold uppercase mb-0.5 tracking-tighter">Amount</p>
-                <p className="text-lg font-bold text-gray-900">{formatCurrency(bill.totalAmount)}</p>
+            <div className="flex items-center justify-between sm:justify-end gap-3 sm:gap-6 w-full sm:w-auto pt-3 sm:pt-0 border-t sm:border-0 border-slate-50">
+              <div className="text-left sm:text-right">
+                <p className="text-[8px] sm:text-[10px] text-slate-400 font-bold uppercase mb-0.5 tracking-tighter shrink-0">Amount</p>
+                <p className="text-base sm:text-lg font-black text-slate-900 tracking-tighter whitespace-nowrap leading-none">{formatCurrency(bill.totalAmount)}</p>
               </div>
               <div className="flex gap-2">
                 <button 
                   onClick={(e) => { e.stopPropagation(); shareBillOnWhatsApp(bill); }}
-                  className="flex items-center gap-2 px-3 py-2 bg-emerald-50 text-emerald-600 rounded-lg text-[10px] font-black uppercase tracking-tight hover:bg-emerald-100 transition-all border border-emerald-100"
+                  className="flex items-center gap-1.5 px-2 sm:px-3 py-2 bg-emerald-50 text-emerald-600 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-tight hover:bg-emerald-100 transition-all border border-emerald-100 shrink-0"
                   title="Share on WhatsApp"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  SEND PDF
+                  <span className="hidden xs:inline">SEND PDF</span>
+                  <span className="xs:hidden">SEND</span>
                 </button>
                 <button 
                   onClick={async (e) => { 
                     e.stopPropagation();
-                    const columns = ['Item', 'Qty', 'Price', 'Subtotal'];
-                    const rows = bill.items.map(i => [i.name, i.quantity, formatCurrency(i.price), formatCurrency(i.quantity * i.price)]);
-                    const summary = [
-                      { label: 'Subtotal', value: formatCurrency(bill.subtotal || 0) },
-                      { label: 'Old Due', value: formatCurrency(bill.oldDue || 0) },
-                      { label: 'Grand Total', value: formatCurrency(bill.totalAmount) },
-                      { label: 'Received Amount', value: formatCurrency(bill.receivedAmount || 0) },
-                      { label: 'New Balance', value: formatCurrency(bill.newBalance || 0) },
-                    ];
-                    const blob = await generatePDF(`Invoice #${bill.billNumber}`, columns, rows, `Invoice_${bill.billNumber}.pdf`, summary);
+                    const blob = await generateInvoicePDF({
+                      title: 'CLOUDSTOCK PRO',
+                      themeColor: '#d32f2f',
+                      salesman_name: user?.name || 'Staff',
+                      date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
+                      invoice_no: bill.billNumber,
+                      customer_name: bill.entityName,
+                      items: bill.items.map(i => ({
+                        item_name: i.name,
+                        rate: i.price,
+                        qty: i.quantity,
+                        subtotal: i.price * i.quantity
+                      })),
+                      total_amount: bill.subtotal || 0,
+                      old_due: bill.oldDue || 0,
+                      receipt_amount: bill.receivedAmount || 0,
+                      new_balance: bill.newBalance || 0
+                    });
                     const link = document.createElement('a');
                     link.href = URL.createObjectURL(blob);
                     link.download = `Invoice_${bill.billNumber}.pdf`;
                     link.click();
                   }}
-                  className="flex items-center gap-2 px-3 py-2 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-black uppercase tracking-tight hover:bg-blue-100 transition-all border border-blue-100"
+                  className="flex items-center gap-1.5 px-2 sm:px-3 py-2 bg-blue-50 text-blue-600 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-tight hover:bg-blue-100 transition-all border border-blue-100 shrink-0"
                   title="Download Invoice"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  DOWNLOAD
+                  <span className="hidden xs:inline">DOWNLOAD</span>
                 </button>
                 {user?.role === 'admin' && (
                    <button 

@@ -452,10 +452,11 @@ const Login: React.FC = () => {
           <motion.div
             initial={{ scale: 0.8, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            className="w-24 h-24 mx-auto mb-6 flex items-center justify-center p-2 rounded-3xl bg-white shadow-2xl shadow-white/5 overflow-hidden"
+            className="w-72 h-72 mx-auto mb-2 flex items-center justify-center overflow-hidden"
           >
             <img src="/LOGO.png" alt="CloudStock Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
           </motion.div>
+          <p className="text-slate-300 font-black tracking-[0.2em] text-lg mb-6">SNTC BHADSORA</p>
           <h1 className="text-3xl font-bold text-white mb-2">Welcome Back</h1>
           <p className="text-slate-400">Inventory Management for the Modern Sales Team</p>
         </div>
