@@ -1,4 +1,4 @@
-import React, { useState, useEffect, createContext, useContext } from 'react';
+import React, { useState, useEffect, createContext, useContext, lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate, useLocation } from 'react-router-dom';
 import { onAuthStateChanged, signOut, GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
@@ -17,23 +17,24 @@ import {
   AlertTriangle,
   Tag,
   Layers,
-  Bell
+  Bell,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { collection, onSnapshot } from 'firebase/firestore';
 
 // Modules
-// Note: I will create these components in later steps
-const Dashboard = React.lazy(() => import('./modules/Dashboard'));
-const Inventory = React.lazy(() => import('./modules/Inventory'));
-const Sales = React.lazy(() => import('./modules/Sales'));
-const Purchases = React.lazy(() => import('./modules/Purchases'));
-const Customers = React.lazy(() => import('./modules/Customers'));
-const Suppliers = React.lazy(() => import('./modules/Suppliers'));
-const Transfers = React.lazy(() => import('./modules/Transfers'));
-const Brands = React.lazy(() => import('./modules/Brands'));
-const Categories = React.lazy(() => import('./modules/Categories'));
-const Staff = React.lazy(() => import('./modules/Staff'));
+const Dashboard = lazy(() => import('./modules/Dashboard'));
+const Inventory = lazy(() => import('./modules/Inventory'));
+const Sales = lazy(() => import('./modules/Sales'));
+const Purchases = lazy(() => import('./modules/Purchases'));
+const Customers = lazy(() => import('./modules/Customers'));
+const Suppliers = lazy(() => import('./modules/Suppliers'));
+const Transfers = lazy(() => import('./modules/Transfers'));
+const Brands = lazy(() => import('./modules/Brands'));
+const Categories = lazy(() => import('./modules/Categories'));
+const Staff = lazy(() => import('./modules/Staff'));
 
 // Auth Context
 interface AuthContextType {
@@ -59,8 +60,22 @@ const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => 
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [showSyncStatus, setShowSyncStatus] = useState(false);
 
   useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      setShowSyncStatus(true);
+      setTimeout(() => setShowSyncStatus(false), 3000);
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
     // Service Worker update detection
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistration().then(reg => {
@@ -131,6 +146,8 @@ const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => 
     });
 
     return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
       unsubscribe();
       clearTimeout(timeoutId);
     };
@@ -142,19 +159,32 @@ const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => 
     setAuthError(null);
     try {
       const provider = new GoogleAuthProvider();
-      // Add custom parameters to handle iframe session issues if needed
       provider.setCustomParameters({ prompt: 'select_account' });
       await signInWithPopup(auth, provider);
     } catch (error: any) {
-      console.error("Sign in error:", error);
-      if (error.code === 'auth/popup-blocked') {
-        setAuthError('Sign-in popup was blocked by your browser. Please allow popups for this site.');
-      } else if (error.code === 'auth/popup-closed-by-user') {
-        setAuthError('Sign-in popup was closed before completion. Please try again and complete the sign-in.');
-      } else if (error.code === 'auth/cancelled-popup-request') {
-        // Ignore, handled by the state lock
-      } else {
-        setAuthError(error.message || 'An unexpected authentication error occurred.');
+      console.error("Sign in error handle:", error.code, error.message);
+      
+      // Map Firebase error codes to user-friendly messages
+      switch (error.code) {
+        case 'auth/popup-blocked':
+          setAuthError('The sign-in popup was blocked by your browser. Please allow popups for this site and try again.');
+          break;
+        case 'auth/popup-closed-by-user':
+          // Don't show a scary error if they just closed it, maybe they changed their mind
+          // But provide a gentle reminder
+          setAuthError('Sign-in was cancelled because the window was closed. Please click "Sign In" again to continue.');
+          break;
+        case 'auth/cancelled-popup-request':
+          // Usually happens when clicking too fast, can ignore or show quiet message
+          break;
+        case 'auth/unauthorized-domain':
+          setAuthError('This domain is not authorized for Google Sign-In. Please contact admin.');
+          break;
+        case 'auth/network-request-failed':
+          setAuthError('Network error. Please check your internet connection.');
+          break;
+        default:
+          setAuthError(error.message || 'An unexpected authentication error occurred. Please try again.');
       }
     } finally {
       setIsSigningIn(false);
@@ -199,6 +229,33 @@ const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => 
   return (
     <AuthContext.Provider value={value}>
       {children}
+      
+      {/* Connection Status Banner */}
+      <AnimatePresence>
+        {!isOnline && (
+          <motion.div 
+            initial={{ y: -50, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: -50, opacity: 0 }}
+            className="fixed top-0 inset-x-0 z-[10001] bg-rose-600 text-white py-2 px-4 shadow-lg flex items-center justify-center gap-3"
+          >
+            <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
+            <p className="text-xs font-black uppercase tracking-widest">You are offline — changes will sync when connection is restored</p>
+          </motion.div>
+        )}
+        {showSyncStatus && isOnline && (
+          <motion.div 
+            initial={{ y: -50, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: -50, opacity: 0 }}
+            className="fixed top-0 inset-x-0 z-[10001] bg-emerald-600 text-white py-2 px-4 shadow-lg flex items-center justify-center gap-3"
+          >
+            <div className="w-2 h-2 rounded-full bg-white animate-bounce" />
+            <p className="text-xs font-black uppercase tracking-widest">Back online — syncing data...</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {updateAvailable && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[10000] bg-blue-600 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-4 animate-in fade-in slide-in-from-top-4">
           <p className="text-sm font-bold">New update available!</p>
@@ -257,7 +314,18 @@ const MainLayout: React.FC = () => {
   const { user, logout } = useAuth();
   const [isSidebarOpen, setSidebarOpen] = useState(false);
   const [lowStockCount, setLowStockCount] = useState(0);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
   const location = useLocation();
+
+  useEffect(() => {
+    const handleStatus = () => setIsOnline(navigator.onLine);
+    window.addEventListener('online', handleStatus);
+    window.addEventListener('offline', handleStatus);
+    return () => {
+      window.removeEventListener('online', handleStatus);
+      window.removeEventListener('offline', handleStatus);
+    };
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -330,11 +398,16 @@ const MainLayout: React.FC = () => {
         ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
       `}>
         <div className="flex flex-col h-full">
-          <div className="p-6 border-b border-gray-800">
-            <h1 className="text-xl font-bold tracking-tight uppercase">
-              CloudStock
-            </h1>
-            <p className="text-[10px] text-gray-400 mt-1 uppercase tracking-widest font-bold">Inventory & Sales</p>
+          <div className="p-6 border-b border-gray-800 flex items-center justify-between">
+            <div>
+              <h1 className="text-xl font-bold tracking-tight uppercase">
+                CloudStock
+              </h1>
+              <p className="text-[10px] text-gray-400 mt-1 uppercase tracking-widest font-bold">Inventory & Sales</p>
+            </div>
+            <div className={`p-1.5 rounded-lg ${isOnline ? 'bg-emerald-500/10 text-emerald-500' : 'bg-rose-500/10 text-rose-500'}`}>
+              {isOnline ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
+            </div>
           </div>
 
           <nav className="flex-1 p-4 space-y-2 overflow-y-auto sidebar-scrollbar">
@@ -387,9 +460,10 @@ const MainLayout: React.FC = () => {
 
       {/* Main Content */}
       <main className="flex-1 p-4 lg:p-8 overflow-auto">
-        <React.Suspense fallback={
-          <div className="h-full flex items-center justify-center">
-             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600" />
+        <Suspense fallback={
+          <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
+            <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+            <p className="text-xs font-black text-gray-400 uppercase tracking-widest animate-pulse">Loading module...</p>
           </div>
         }>
           <Routes>
@@ -403,8 +477,9 @@ const MainLayout: React.FC = () => {
             <Route path="/categories" element={<ProtectedRoute adminOnly><Categories /></ProtectedRoute>} />
             <Route path="/transfers" element={<Transfers />} />
             <Route path="/staff" element={<ProtectedRoute adminOnly><Staff /></ProtectedRoute>} />
+            <Route path="*" element={<Navigate to="/" />} />
           </Routes>
-        </React.Suspense>
+        </Suspense>
       </main>
     </div>
   );

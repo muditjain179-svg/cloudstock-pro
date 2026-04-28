@@ -4,6 +4,7 @@
   "description": "Professional Real-time Inventory & Sales Management System",
   "start_url": "/",
   "display": "standalone",
+  "prefer_related_applications": false,
   "orientation": "portrait",
   "background_color": "#0f172a",
   "theme_color": "#4f46e5",

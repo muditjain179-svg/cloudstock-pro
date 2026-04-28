@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { initializeFirestore, doc, getDocFromServer } from 'firebase/firestore';
+import { initializeFirestore, doc, getDocFromServer, enableMultiTabIndexedDbPersistence } from 'firebase/firestore';
 
 const firebaseConfig = {
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
@@ -12,35 +12,27 @@ const firebaseConfig = {
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
-// REMINDER: Add these domains to Firebase Console -> Authentication -> Authorized Domains:
-// 1. cloudstock-pro.muditjain179.workers.dev
-// 2. chrome-formula-465813-u4.firebaseapp.com
-// 3. localhost
-
-// Startup check for required environment variables
-const requiredEnvVars = [
-  'VITE_FIREBASE_PROJECT_ID',
-  'VITE_FIREBASE_APP_ID',
-  'VITE_FIREBASE_API_KEY'
-];
-
-requiredEnvVars.forEach(key => {
-  const value = import.meta.env[key];
-  if (!value || typeof value !== 'string' || value.includes('your-')) {
-    console.warn(`Missing or placeholder environment variable: ${key}`);
-  }
-});
-
+// ... existing code ...
 const app = initializeApp(firebaseConfig);
 
-// Optimize for unstable networking environments (proxies, mobile, development iframes)
-// by forcing long-polling. This resolves the recurring "Listen stream transport errored" logs.
+// Optimize for unstable networking environments
 const dbId = import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID;
 const finalDbId = (!dbId || dbId.includes('your-')) ? '(default)' : dbId;
 
 export const db = initializeFirestore(app, {
   experimentalForceLongPolling: true,
 }, finalDbId);
+
+// Enable persistence
+enableMultiTabIndexedDbPersistence(db).catch((err) => {
+    if (err.code === 'failed-precondition') {
+        // Multiple tabs open, persistence can only be enabled in one tab at a a time.
+        console.warn('Firestore persistence failed: Multiple tabs open');
+    } else if (err.code === 'unimplemented') {
+        // The current browser does not support all of the features required to enable persistence
+        console.warn('Firestore persistence failed: Browser not supported');
+    }
+});
 
 export const auth = getAuth(app);
 

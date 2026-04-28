@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   collection, 
   onSnapshot, 
@@ -28,7 +28,8 @@ import {
   Layers, 
   Users,
   ChevronRight,
-  Info
+  Info,
+  CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Link } from 'react-router-dom';
@@ -48,6 +49,8 @@ const Inventory: React.FC = () => {
   const [filterCategory, setFilterCategory] = useState('');
   const [isModalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
+  const [showToast, setShowToast] = useState(false);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   
   // Stock Breakdown Modal
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
@@ -145,7 +148,7 @@ const Inventory: React.FC = () => {
     return () => unsub();
   }, [selectedSalesmanId, user]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent, addNext: boolean = false) => {
     e.preventDefault();
     if (!user || user.role !== 'admin') return;
 
@@ -161,9 +164,29 @@ const Inventory: React.FC = () => {
           mainStock: formData.openingBalance
         });
       }
-      setModalOpen(false);
-      setEditingItem(null);
-      setFormData({ name: '', category: '', brand: '', openingBalance: 0, lowStockThreshold: 5 });
+
+      if (addNext && !editingItem) {
+        // Show success toast
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 2000);
+        
+        // Reset form but keep category and brand
+        setFormData({
+          ...formData,
+          name: '',
+          openingBalance: 0,
+          lowStockThreshold: 5
+        });
+        
+        // Focus first field
+        setTimeout(() => {
+          nameInputRef.current?.focus();
+        }, 100);
+      } else {
+        setModalOpen(false);
+        setEditingItem(null);
+        setFormData({ name: '', category: '', brand: '', openingBalance: 0, lowStockThreshold: 5 });
+      }
     } catch (error) {
       console.error("Error saving item:", error);
     }
@@ -550,11 +573,25 @@ const Inventory: React.FC = () => {
                   <X className="w-6 h-6" />
                 </button>
               </div>
-              <form onSubmit={handleSubmit} className="p-6 space-y-4">
+              <form onSubmit={(e) => handleSave(e, false)} className="p-6 space-y-4">
+                <AnimatePresence>
+                  {showToast && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      className="bg-emerald-50 text-emerald-700 px-4 py-2 rounded-lg border border-emerald-100 flex items-center gap-2 mb-2"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span className="text-xs font-bold uppercase tracking-tight">Item saved! Add another:</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-1">Item Name</label>
                   <input
                     required
+                    ref={nameInputRef}
                     type="text"
                     value={formData.name}
                     onChange={e => setFormData({...formData, name: e.target.value})}
@@ -618,12 +655,23 @@ const Inventory: React.FC = () => {
                     />
                   </div>
                 </div>
-                <button
-                  type="submit"
-                  className="w-full py-4 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-[0.98]"
-                >
-                  {editingItem ? 'UPDATE ITEM CONFIG' : 'CREATE NEW ITEM'}
-                </button>
+                <div className="flex flex-col sm:flex-row gap-3 pt-2">
+                  <button
+                    type="submit"
+                    className="flex-1 py-4 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-[0.98]"
+                  >
+                    {editingItem ? 'UPDATE ITEM CONFIG' : 'CREATE NEW ITEM'}
+                  </button>
+                  {!editingItem && (
+                    <button
+                      type="button"
+                      onClick={(e) => handleSave(e, true)}
+                      className="flex-1 py-4 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 active:scale-[0.98]"
+                    >
+                      SAVE & ADD NEXT
+                    </button>
+                  )}
+                </div>
               </form>
             </motion.div>
           </div>

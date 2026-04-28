@@ -1,23 +1,25 @@
-const CACHE_NAME = 'cloudstock-v2';
+const CACHE_NAME = 'cloudstock-v1';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
-  '/LOGO.png'
+  '/LOGO.png',
+  '/assets/index.js',
+  '/assets/index.css'
 ];
 
-// Install Event
+// Install Event - Cache App Shell
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      console.log('[Service Worker] Pre-caching static assets');
+      console.log('[Service Worker] Pre-caching app shell');
       return cache.addAll(STATIC_ASSETS);
     })
   );
   self.skipWaiting();
 });
 
-// Activate Event
+// Activate Event - Clean up old caches
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => {
@@ -36,31 +38,55 @@ self.addEventListener('activate', (event) => {
 
 // Fetch Event
 self.addEventListener('fetch', (event) => {
-  // Only handle GET requests
   if (event.request.method !== 'GET') return;
 
-  // Skip firestore and other external API requests for basic caching
-  if (event.request.url.includes('firestore.googleapis.com')) return;
+  const url = new URL(event.request.url);
 
-  event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) return cachedResponse;
+  // Firestore and Firebase Auth handled by their own SDK persistence
+  if (url.hostname.includes('firebase') || url.hostname.includes('googleapis')) {
+    return;
+  }
 
-      return fetch(event.request).then((networkResponse) => {
-        // Cache new assets on the fly
-        if (networkResponse.status === 200) {
+  // Network-first strategy for dynamic content / API calls
+  // Cache-first for static assets
+  const isStaticAsset = STATIC_ASSETS.includes(url.pathname) || 
+                        url.pathname.includes('/assets/') || 
+                        url.pathname.endsWith('.png') || 
+                        url.pathname.endsWith('.jpg') || 
+                        url.pathname.endsWith('.svg');
+
+  if (isStaticAsset) {
+    event.respondWith(
+      caches.match(event.request).then((cachedResponse) => {
+        return cachedResponse || fetch(event.request).then((networkResponse) => {
           return caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request.url, networkResponse.clone());
+            cache.put(event.request, networkResponse.clone());
             return networkResponse;
           });
-        }
-        return networkResponse;
-      }).catch(() => {
-        // Offline fallback for navigation
-        if (event.request.mode === 'navigate') {
-          return caches.match('/');
-        }
-      });
-    })
-  );
+        });
+      })
+    );
+  } else {
+    // Network-first for everything else (including navigation)
+    event.respondWith(
+      fetch(event.request)
+        .then((networkResponse) => {
+          if (networkResponse.status === 200) {
+            return caches.open(CACHE_NAME).then((cache) => {
+              cache.put(event.request, networkResponse.clone());
+              return networkResponse;
+            });
+          }
+          return networkResponse;
+        })
+        .catch(() => {
+          return caches.match(event.request).then((cachedResponse) => {
+            if (cachedResponse) return cachedResponse;
+            if (event.request.mode === 'navigate') {
+              return caches.match('/');
+            }
+          });
+        })
+    );
+  }
 });
