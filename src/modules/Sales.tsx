@@ -125,9 +125,10 @@ const Sales: React.FC = () => {
   const addItemToBill = (item: Item) => {
     const existing = billData.items.find(i => i.itemId === item.id);
     if (existing) return;
+    const newItems = [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: '' as any }];
     setBillData({
       ...billData,
-      items: [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: '' as any }]
+      items: newItems
     });
   };
 
@@ -139,13 +140,13 @@ const Sales: React.FC = () => {
       const stockItem = items.find(i => i.id === billItem.itemId);
       const available = user?.role === 'admin' ? stockItem?.mainStock : (salesmanInventory[billItem.itemId] || 0);
       
-      let safeQty: number | '' = updates.quantity;
+      let safeQty: any = updates.quantity;
       if (safeQty !== '') {
         // Cap quantity at available stock
         safeQty = Math.min(Number(safeQty), available || 0);
         if (safeQty < 0) safeQty = 0;
       }
-      newItems[index] = { ...billItem, ...updates, quantity: safeQty as any };
+      newItems[index] = { ...billItem, ...updates, quantity: safeQty };
     } else {
       newItems[index] = { ...billItem, ...updates };
     }
@@ -154,7 +155,20 @@ const Sales: React.FC = () => {
   };
 
   const handleSaveBill = async (status: 'draft' | 'finalized') => {
-    if (!billData.customer || billData.items.length === 0 || !user || isSaving) return;
+    if (!billData.customer) {
+      alert("Please select a customer");
+      return;
+    }
+    if (billData.items.length === 0) {
+      alert("Please add at least one item");
+      return;
+    }
+    const invalidItems = billData.items.some(i => i.quantity === '' || Number(i.quantity) <= 0 || i.price === '' || Number(i.price) < 0);
+    if (invalidItems) {
+      alert("Please ensure all items have a valid quantity and price");
+      return;
+    }
+    if (!user || isSaving) return;
 
     if (status === 'finalized' && !showFinalizeOverlay) {
       setIsSaving(true);

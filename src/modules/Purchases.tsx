@@ -107,9 +107,10 @@ const Purchases: React.FC = () => {
   const addItemToBill = (item: Item) => {
     const existing = billData.items.find(i => i.itemId === item.id);
     if (existing) return;
+    const newItems = [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: '' as any }];
     setBillData({
       ...billData,
-      items: [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: '' as any }]
+      items: newItems
     });
   };
 
@@ -139,7 +140,20 @@ const Purchases: React.FC = () => {
   };
 
   const handleSaveBill = async (status: 'draft' | 'finalized') => {
-    if (!billData.supplier || billData.items.length === 0 || !user || user.role !== 'admin' || isSaving) return;
+    if (!billData.supplier) {
+      alert("Please select a supplier");
+      return;
+    }
+    if (billData.items.length === 0) {
+      alert("Please add at least one item");
+      return;
+    }
+    const invalidItems = billData.items.some(i => i.quantity === '' || Number(i.quantity) <= 0 || i.price === '' || Number(i.price) < 0);
+    if (invalidItems) {
+      alert("Please ensure all items have a valid quantity and price");
+      return;
+    }
+    if (!user || user.role !== 'admin' || isSaving) return;
 
     // Show preview first if finalizing
     if (status === 'finalized' && !showFinalizeOverlay) {

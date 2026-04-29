@@ -66,11 +66,7 @@ const Inventory: React.FC = () => {
     category: '',
     brand: '',
     openingBalance: '' as number | '',
-    mainStock: '' as number | '',
-    lowStockThreshold: '' as number | '',
-    unit: '',
-    purchasePrice: '' as number | '',
-    sellingPrice: '' as number | ''
+    lowStockThreshold: 5 as number | '',
   });
 
   const getInputFieldClass = (fieldName: string, value: any, isNumber: boolean = false, min: number = 0) => {
@@ -175,11 +171,7 @@ const Inventory: React.FC = () => {
     if (!formData.category) newErrors.category = 'Category is required';
     if (!formData.brand) newErrors.brand = 'Brand is required';
     if (formData.openingBalance === '' || Number(formData.openingBalance) < 0) newErrors.openingBalance = 'Opening balance must be 0 or more';
-    if (formData.mainStock === '' || Number(formData.mainStock) < 0) newErrors.mainStock = 'Main stock must be 0 or more';
     if (formData.lowStockThreshold === '' || Number(formData.lowStockThreshold) < 0) newErrors.lowStockThreshold = 'Low stock limit must be 0 or more';
-    if (!formData.unit.trim()) newErrors.unit = 'Unit is required';
-    if (formData.purchasePrice === '' || Number(formData.purchasePrice) <= 0) newErrors.purchasePrice = 'Purchase price must be greater than 0';
-    if (formData.sellingPrice === '' || Number(formData.sellingPrice) <= 0) newErrors.sellingPrice = 'Selling price must be greater than 0';
 
     // Duplicate check
     const isDuplicate = items.some(item => 
@@ -208,10 +200,11 @@ const Inventory: React.FC = () => {
       const payload = {
         ...formData,
         openingBalance: Number(formData.openingBalance),
-        mainStock: Number(formData.mainStock),
         lowStockThreshold: Number(formData.lowStockThreshold),
-        purchasePrice: Number(formData.purchasePrice),
-        sellingPrice: Number(formData.sellingPrice)
+        mainStock: editingItem ? (items.find(i => i.id === editingItem.id)?.mainStock || Number(formData.openingBalance)) : Number(formData.openingBalance),
+        unit: editingItem ? (items.find(i => i.id === editingItem.id)?.unit || 'pcs') : 'pcs',
+        purchasePrice: editingItem ? (items.find(i => i.id === editingItem.id)?.purchasePrice || 0) : 0,
+        sellingPrice: editingItem ? (items.find(i => i.id === editingItem.id)?.sellingPrice || 0) : 0
       };
 
       if (editingItem) {
@@ -231,11 +224,7 @@ const Inventory: React.FC = () => {
           ...formData,
           name: '',
           openingBalance: '' as number | '',
-          mainStock: '' as number | '',
-          lowStockThreshold: '' as number | '',
-          unit: '',
-          purchasePrice: '' as number | '',
-          sellingPrice: '' as number | ''
+          lowStockThreshold: 5
         });
         setErrors({});
         
@@ -251,11 +240,7 @@ const Inventory: React.FC = () => {
           category: '', 
           brand: '', 
           openingBalance: '' as number | '', 
-          mainStock: '' as number | '',
-          lowStockThreshold: '' as number | '',
-          unit: '',
-          purchasePrice: '' as number | '',
-          sellingPrice: '' as number | ''
+          lowStockThreshold: 5,
         });
         setErrors({});
       }
@@ -360,7 +345,7 @@ const Inventory: React.FC = () => {
             <button 
               onClick={() => {
                 setEditingItem(null);
-                setFormData({ name: '', category: '', brand: '', openingBalance: 0, lowStockThreshold: 5 });
+                setFormData({ name: '', category: '', brand: '', openingBalance: '' as any, lowStockThreshold: 5 });
                 setModalOpen(true);
               }}
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded text-xs font-bold hover:bg-blue-700 transition-colors shadow-sm"
@@ -473,11 +458,7 @@ const Inventory: React.FC = () => {
                               category: item.category, 
                               brand: item.brand, 
                               openingBalance: item.openingBalance,
-                              mainStock: item.mainStock,
-                              lowStockThreshold: item.lowStockThreshold,
-                              unit: item.unit || '',
-                              purchasePrice: item.purchasePrice,
-                              sellingPrice: item.sellingPrice
+                              lowStockThreshold: item.lowStockThreshold || 5,
                             });
                             setModalOpen(true);
                           }}
@@ -736,16 +717,16 @@ const Inventory: React.FC = () => {
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
-                  <div id="field-unit">
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Unit <span className="text-red-500">*</span></label>
+                  <div id="field-openingBalance">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Opening Balance <span className="text-red-500">*</span></label>
                     <input
-                      type="text"
-                      value={formData.unit}
-                      onChange={e => setFormData({...formData, unit: e.target.value})}
-                      placeholder="e.g. pieces, kg, boxes"
-                      className={getInputFieldClass('unit', formData.unit)}
+                      type="number"
+                      value={formData.openingBalance}
+                      onChange={e => setFormData({...formData, openingBalance: e.target.value === '' ? '' : parseInt(e.target.value)})}
+                      placeholder="0"
+                      className={getInputFieldClass('openingBalance', formData.openingBalance, true, 0)}
                     />
-                    {errors.unit && <p className="text-red-400 text-xs mt-1">{errors.unit}</p>}
+                    {errors.openingBalance && <p className="text-red-400 text-xs mt-1">{errors.openingBalance}</p>}
                   </div>
                   <div id="field-lowStockThreshold">
                     <label className="block text-sm font-bold text-slate-700 mb-1">Low Stock Limit <span className="text-red-500">*</span></label>
@@ -753,62 +734,10 @@ const Inventory: React.FC = () => {
                       type="number"
                       value={formData.lowStockThreshold}
                       onChange={e => setFormData({...formData, lowStockThreshold: e.target.value === '' ? '' : parseInt(e.target.value)})}
-                      placeholder="e.g. 5"
+                      placeholder="5"
                       className={getInputFieldClass('lowStockThreshold', formData.lowStockThreshold, true, 0)}
                     />
                     {errors.lowStockThreshold && <p className="text-red-400 text-xs mt-1">{errors.lowStockThreshold}</p>}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div id="field-openingBalance">
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Opening Balance <span className="text-red-500">*</span></label>
-                    <input
-                      type="number"
-                      value={formData.openingBalance}
-                      onChange={e => setFormData({...formData, openingBalance: e.target.value === '' ? '' : parseInt(e.target.value)})}
-                      placeholder="e.g. 100"
-                      className={getInputFieldClass('openingBalance', formData.openingBalance, true, 0)}
-                    />
-                    {errors.openingBalance && <p className="text-red-400 text-xs mt-1">{errors.openingBalance}</p>}
-                  </div>
-                  <div id="field-mainStock">
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Main Stock (Current) <span className="text-red-500">*</span></label>
-                    <input
-                      type="number"
-                      value={formData.mainStock}
-                      onChange={e => setFormData({...formData, mainStock: e.target.value === '' ? '' : parseInt(e.target.value)})}
-                      placeholder="e.g. 50"
-                      className={getInputFieldClass('mainStock', formData.mainStock, true, 0)}
-                    />
-                    {errors.mainStock && <p className="text-red-400 text-xs mt-1">{errors.mainStock}</p>}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div id="field-purchasePrice">
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Purchase Price <span className="text-red-500">*</span></label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={formData.purchasePrice}
-                      onChange={e => setFormData({...formData, purchasePrice: e.target.value === '' ? '' : parseFloat(e.target.value)})}
-                      placeholder="e.g. 250"
-                      className={getInputFieldClass('purchasePrice', formData.purchasePrice, true, 0.01)}
-                    />
-                    {errors.purchasePrice && <p className="text-red-400 text-xs mt-1">{errors.purchasePrice}</p>}
-                  </div>
-                  <div id="field-sellingPrice">
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Selling Price <span className="text-red-500">*</span></label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={formData.sellingPrice}
-                      onChange={e => setFormData({...formData, sellingPrice: e.target.value === '' ? '' : parseFloat(e.target.value)})}
-                      placeholder="e.g. 300"
-                      className={getInputFieldClass('sellingPrice', formData.sellingPrice, true, 0.01)}
-                    />
-                    {errors.sellingPrice && <p className="text-red-400 text-xs mt-1">{errors.sellingPrice}</p>}
                   </div>
                 </div>
                 <div className="flex flex-col sm:flex-row gap-3 pt-2">

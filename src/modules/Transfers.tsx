@@ -92,7 +92,20 @@ const Transfers: React.FC = () => {
   }, [user]);
 
   const handleTransfer = async () => {
-    if (!billData.salesman || billData.items.length === 0 || !user || isSaving) return;
+    if (!billData.salesman) {
+      alert("Please select a salesman");
+      return;
+    }
+    if (billData.items.length === 0) {
+      alert("Please add at least one item");
+      return;
+    }
+    const invalidItems = billData.items.some(i => i.quantity === '' || Number(i.quantity) <= 0);
+    if (invalidItems) {
+      alert("Please ensure all items have a valid quantity");
+      return;
+    }
+    if (!user || isSaving) return;
 
     if (!showFinalizeOverlay) {
       setIsSaving(true);
@@ -316,9 +329,10 @@ const Transfers: React.FC = () => {
   const addItemToTransfer = (item: Item) => {
     const existing = billData.items.find(i => i.itemId === item.id);
     if (existing) return;
+    const newItems = [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: 0 }];
     setBillData({
       ...billData,
-      items: [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: 0 }]
+      items: newItems
     });
   };
 
