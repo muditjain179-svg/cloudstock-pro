@@ -4,6 +4,7 @@ import {
   onSnapshot, 
   addDoc, 
   updateDoc, 
+  setDoc,
   doc, 
   query, 
   orderBy, 
@@ -59,14 +60,14 @@ const Sales: React.FC = () => {
   const [billData, setBillData] = useState<{
     customer: Customer | null;
     items: BillItem[];
-    oldDue: number;
-    receivedAmount: number;
+    oldDue: number | '';
+    receivedAmount: number | '';
     status: 'draft' | 'finalized';
   }>({
     customer: null,
     items: [],
-    oldDue: 0,
-    receivedAmount: 0,
+    oldDue: '',
+    receivedAmount: '',
     status: 'draft'
   });
 
@@ -117,16 +118,16 @@ const Sales: React.FC = () => {
     return () => { unsubBills(); unsubItems(); unsubCustomers(); unsubInventory(); };
   }, [user]);
 
-  const calculateSubtotal = () => billData.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-  const calculateGrandTotal = () => calculateSubtotal() + billData.oldDue;
-  const calculateNewBalance = () => calculateGrandTotal() - billData.receivedAmount;
+  const calculateSubtotal = () => billData.items.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0);
+  const calculateGrandTotal = () => calculateSubtotal() + Number(billData.oldDue || 0);
+  const calculateNewBalance = () => calculateGrandTotal() - Number(billData.receivedAmount || 0);
 
   const addItemToBill = (item: Item) => {
     const existing = billData.items.find(i => i.itemId === item.id);
     if (existing) return;
     setBillData({
       ...billData,
-      items: [...billData.items, { itemId: item.id, name: item.name, quantity: 1, price: 0 }]
+      items: [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: '' as any }]
     });
   };
 
@@ -138,9 +139,13 @@ const Sales: React.FC = () => {
       const stockItem = items.find(i => i.id === billItem.itemId);
       const available = user?.role === 'admin' ? stockItem?.mainStock : (salesmanInventory[billItem.itemId] || 0);
       
-      // Cap quantity at available stock
-      const safeQty = Math.min(updates.quantity, available || 0);
-      newItems[index] = { ...billItem, ...updates, quantity: safeQty >= 0 ? safeQty : 0 };
+      let safeQty: number | '' = updates.quantity;
+      if (safeQty !== '') {
+        // Cap quantity at available stock
+        safeQty = Math.min(Number(safeQty), available || 0);
+        if (safeQty < 0) safeQty = 0;
+      }
+      newItems[index] = { ...billItem, ...updates, quantity: safeQty as any };
     } else {
       newItems[index] = { ...billItem, ...updates };
     }
@@ -167,13 +172,13 @@ const Sales: React.FC = () => {
           customer_name: billData.customer!.name,
           items: billData.items.map(i => ({
             item_name: i.name,
-            rate: i.price,
-            qty: i.quantity,
-            subtotal: i.price * i.quantity
+            rate: Number(i.price),
+            qty: Number(i.quantity),
+            subtotal: Number(i.price) * Number(i.quantity)
           })),
           total_amount: subtotal,
-          old_due: billData.oldDue,
-          receipt_amount: billData.receivedAmount,
+          old_due: Number(billData.oldDue || 0),
+          receipt_amount: Number(billData.receivedAmount || 0),
           new_balance: newBalance
         });
         const url = URL.createObjectURL(blob);
@@ -218,7 +223,8 @@ const Sales: React.FC = () => {
           }
         }
 
-        const newBillRef = doc(collection(db, 'bills'));
+        const newBillId = crypto.randomUUID();
+        const newBillRef = doc(db, 'bills', newBillId);
         const subtotalValue = calculateSubtotal();
         const grandTotalValue = calculateGrandTotal();
         const newBalanceValue = calculateNewBalance();
@@ -230,11 +236,15 @@ const Sales: React.FC = () => {
           entityId: billData.customer!.id,
           entityName: billData.customer!.name,
           entityPhone: billData.customer!.phone,
-          items: billData.items,
+          items: billData.items.map(i => ({
+            ...i,
+            quantity: Number(i.quantity),
+            price: Number(i.price)
+          })),
           subtotal: subtotalValue,
-          oldDue: billData.oldDue,
+          oldDue: Number(billData.oldDue || 0),
           totalAmount: grandTotalValue,
-          receivedAmount: billData.receivedAmount,
+          receivedAmount: Number(billData.receivedAmount || 0),
           newBalance: newBalanceValue,
           createdBy: user.id,
           status
@@ -255,21 +265,21 @@ const Sales: React.FC = () => {
           customer_name: createdBill.entityName,
           items: createdBill.items.map(i => ({
             item_name: i.name,
-            rate: i.price,
-            qty: i.quantity,
-            subtotal: i.price * i.quantity
+            rate: Number(i.price),
+            qty: Number(i.quantity),
+            subtotal: Number(i.price) * Number(i.quantity)
           })),
           total_amount: createdBill.subtotal,
-          old_due: createdBill.oldDue,
-          receipt_amount: createdBill.receivedAmount,
-          new_balance: createdBill.newBalance
+          old_due: Number(createdBill.oldDue || 0),
+          receipt_amount: Number(createdBill.receivedAmount || 0),
+          new_balance: Number(createdBill.newBalance || 0)
         });
 
         if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
         setPdfPreviewUrl(URL.createObjectURL(blob));
       } else {
         setIsCreating(false);
-        setBillData({ customer: null, items: [], oldDue: 0, receivedAmount: 0, status: 'draft' });
+        setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
       }
     } catch (error: any) {
       alert(error.message || "Error saving bill");
@@ -280,14 +290,20 @@ const Sales: React.FC = () => {
 
   const handleAddCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSaving) return;
+    setIsSaving(true);
     try {
-      const docRef = await addDoc(collection(db, 'customers'), newCustomer);
-      const created = { id: docRef.id, ...newCustomer } as Customer;
+      const customerId = crypto.randomUUID();
+      const customerRef = doc(db, 'customers', customerId);
+      await setDoc(customerRef, newCustomer);
+      const created = { id: customerId, ...newCustomer } as Customer;
       setBillData({ ...billData, customer: created });
       setCustomerModalOpen(false);
       setNewCustomer({ name: '', phone: '' });
     } catch (error) {
       console.error("Error adding customer:", error);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -390,7 +406,8 @@ const Sales: React.FC = () => {
 
   if (isCreating) {
     return (
-      <div className="space-y-6">
+      <>
+        <div className="space-y-6">
         <div className="flex items-center gap-4">
           <button 
             onClick={() => setIsCreating(false)} 
@@ -554,7 +571,8 @@ const Sales: React.FC = () => {
                         value={item.quantity}
                         min="0"
                         max={user?.role === 'admin' ? items.find(i => i.id === item.itemId)?.mainStock : (salesmanInventory[item.itemId] || 0)}
-                        onChange={(e) => updateBillItem(idx, { quantity: parseInt(e.target.value) || 0 })}
+                        onChange={(e) => updateBillItem(idx, { quantity: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
+                        placeholder="e.g. 25"
                         className="w-full px-2 py-1 border rounded-md focus:ring-2 focus:ring-indigo-500 outline-none"
                       />
                     </div>
@@ -563,7 +581,8 @@ const Sales: React.FC = () => {
                       <input 
                         type="number" 
                         value={item.price}
-                        onChange={(e) => updateBillItem(idx, { price: parseInt(e.target.value) || 0 })}
+                        onChange={(e) => updateBillItem(idx, { price: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
+                        placeholder="e.g. 300"
                         className="w-full px-2 py-1 border rounded-md"
                       />
                     </div>
@@ -596,9 +615,9 @@ const Sales: React.FC = () => {
                     <input 
                       type="number"
                       value={billData.oldDue}
-                      onChange={(e) => setBillData({ ...billData, oldDue: parseFloat(e.target.value) || 0 })}
+                      onChange={(e) => setBillData({ ...billData, oldDue: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                       className="w-full pl-8 pr-4 py-2 bg-slate-50 border border-slate-100 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                      placeholder="0.00"
+                      placeholder="e.g. 250"
                     />
                   </div>
                 </div>
@@ -615,9 +634,9 @@ const Sales: React.FC = () => {
                     <input 
                       type="number"
                       value={billData.receivedAmount}
-                      onChange={(e) => setBillData({ ...billData, receivedAmount: parseFloat(e.target.value) || 0 })}
+                      onChange={(e) => setBillData({ ...billData, receivedAmount: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                       className="w-full pl-8 pr-4 py-2 bg-emerald-50/30 border border-emerald-100 rounded-lg text-sm font-bold text-emerald-700 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                      placeholder="0.00"
+                      placeholder="e.g. 300"
                     />
                   </div>
                 </div>
@@ -628,7 +647,19 @@ const Sales: React.FC = () => {
                 </div>
               </div>
 
-              <div className="space-y-3">
+                <AnimatePresence>
+                  {!navigator.onLine && (
+                    <motion.div 
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      className="bg-amber-50 text-amber-700 p-3 rounded-lg border border-amber-100 mb-4"
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-widest text-center">
+                        You are offline. Your data will be saved when connection is restored.
+                      </p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
                 <button 
                   onClick={() => handleSaveBill('finalized')}
                   disabled={isSaving}
@@ -648,8 +679,14 @@ const Sales: React.FC = () => {
                   disabled={isSaving}
                   className="w-full py-4 bg-white border border-slate-200 text-slate-700 font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-slate-50 disabled:opacity-50"
                 >
-                  <Save className="w-5 h-5" />
-                  Save as Draft
+                  {isSaving ? (
+                    <div className="w-5 h-5 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <>
+                      <Save className="w-5 h-5" />
+                      Save as Draft
+                    </>
+                  )}
                 </button>
               </div>
             </div>
@@ -690,8 +727,17 @@ const Sales: React.FC = () => {
                     />
                   </div>
                   <div className="pt-4">
-                    <button type="submit" className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-[0.98] uppercase tracking-widest text-xs">
-                      SAVE CUSTOMER
+                    <button 
+                      type="submit" 
+                      disabled={isSaving}
+                      className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-[0.98] uppercase tracking-widest text-xs flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                      {isSaving ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          SAVING...
+                        </>
+                      ) : 'SAVE CUSTOMER'}
                     </button>
                   </div>
                 </form>
@@ -820,7 +866,7 @@ const Sales: React.FC = () => {
             </div>
           )}
         </AnimatePresence>
-      </div>
+      </>
     );
   }
 

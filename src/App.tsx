@@ -616,9 +616,14 @@ const Login: React.FC = () => {
 
             <button 
               disabled={isSubmitting}
-              className="w-full py-4 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-lg shadow-indigo-500/20 transition-all active:scale-[0.98] disabled:opacity-50"
+              className="w-full py-4 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-lg shadow-indigo-500/20 transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2"
             >
-              {isSubmitting ? 'Processing...' : (isSignUp ? 'CREATE ACCOUNT' : 'LOGIN')}
+              {isSubmitting ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  PROCESSING...
+                </>
+              ) : (isSignUp ? 'CREATE ACCOUNT' : 'LOGIN')}
             </button>
 
             <button 

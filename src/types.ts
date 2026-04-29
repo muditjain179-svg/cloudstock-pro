@@ -15,6 +15,9 @@ export interface Item {
   openingBalance: number;
   mainStock: number;
   lowStockThreshold: number;
+  unit: string;
+  purchasePrice: number;
+  sellingPrice: number;
 }
 
 export interface Brand {

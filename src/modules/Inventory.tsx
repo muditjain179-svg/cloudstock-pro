@@ -50,6 +50,8 @@ const Inventory: React.FC = () => {
   const [isModalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [showToast, setShowToast] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const nameInputRef = useRef<HTMLInputElement>(null);
   
   // Stock Breakdown Modal
@@ -63,9 +65,24 @@ const Inventory: React.FC = () => {
     name: '',
     category: '',
     brand: '',
-    openingBalance: 0,
-    lowStockThreshold: 5
+    openingBalance: '' as number | '',
+    mainStock: '' as number | '',
+    lowStockThreshold: '' as number | '',
+    unit: '',
+    purchasePrice: '' as number | '',
+    sellingPrice: '' as number | ''
   });
+
+  const getInputFieldClass = (fieldName: string, value: any, isNumber: boolean = false, min: number = 0) => {
+    const hasError = !!errors[fieldName];
+    const isValid = isNumber ? (Number(value) >= min && !hasError) : (String(value).trim() !== '' && !hasError);
+    return cn(
+      "w-full px-4 py-2 border rounded-lg focus:ring-2 outline-none shadow-sm transition-all text-sm",
+      hasError 
+        ? "border-red-500 bg-red-50 focus:ring-red-200" 
+        : (isValid ? "border-emerald-500 bg-emerald-50/30 focus:ring-emerald-200" : "border-slate-200 focus:ring-indigo-500")
+    );
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -150,19 +167,58 @@ const Inventory: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent, addNext: boolean = false) => {
     e.preventDefault();
-    if (!user || user.role !== 'admin') return;
+    if (!user || user.role !== 'admin' || isSubmitting) return;
 
+    const newErrors: Record<string, string> = {};
+
+    if (!formData.name.trim()) newErrors.name = 'Item name is required';
+    if (!formData.category) newErrors.category = 'Category is required';
+    if (!formData.brand) newErrors.brand = 'Brand is required';
+    if (formData.openingBalance === '' || Number(formData.openingBalance) < 0) newErrors.openingBalance = 'Opening balance must be 0 or more';
+    if (formData.mainStock === '' || Number(formData.mainStock) < 0) newErrors.mainStock = 'Main stock must be 0 or more';
+    if (formData.lowStockThreshold === '' || Number(formData.lowStockThreshold) < 0) newErrors.lowStockThreshold = 'Low stock limit must be 0 or more';
+    if (!formData.unit.trim()) newErrors.unit = 'Unit is required';
+    if (formData.purchasePrice === '' || Number(formData.purchasePrice) <= 0) newErrors.purchasePrice = 'Purchase price must be greater than 0';
+    if (formData.sellingPrice === '' || Number(formData.sellingPrice) <= 0) newErrors.sellingPrice = 'Selling price must be greater than 0';
+
+    // Duplicate check
+    const isDuplicate = items.some(item => 
+      item.name.toLowerCase().trim() === formData.name.toLowerCase().trim() && 
+      (!editingItem || item.id !== editingItem.id)
+    );
+
+    if (isDuplicate) {
+      newErrors.name = 'An item with this name already exists. Please use a different name or edit the existing item.';
+    }
+
+    setErrors(newErrors);
+    
+    if (Object.keys(newErrors).length > 0) {
+      // Scroll to first error
+      const firstErrorField = Object.keys(newErrors)[0];
+      const element = document.getElementById(`field-${firstErrorField}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return;
+    }
+
+    setIsSubmitting(true);
     try {
+      const payload = {
+        ...formData,
+        openingBalance: Number(formData.openingBalance),
+        mainStock: Number(formData.mainStock),
+        lowStockThreshold: Number(formData.lowStockThreshold),
+        purchasePrice: Number(formData.purchasePrice),
+        sellingPrice: Number(formData.sellingPrice)
+      };
+
       if (editingItem) {
-        await updateDoc(doc(db, 'items', editingItem.id), {
-          ...formData,
-          mainStock: items.find(i => i.id === editingItem.id)?.mainStock || formData.openingBalance
-        });
+        await updateDoc(doc(db, 'items', editingItem.id), payload);
       } else {
-        await addDoc(collection(db, 'items'), {
-          ...formData,
-          mainStock: formData.openingBalance
-        });
+        const itemId = crypto.randomUUID();
+        await setDoc(doc(db, 'items', itemId), payload);
       }
 
       if (addNext && !editingItem) {
@@ -174,9 +230,14 @@ const Inventory: React.FC = () => {
         setFormData({
           ...formData,
           name: '',
-          openingBalance: 0,
-          lowStockThreshold: 5
+          openingBalance: '' as number | '',
+          mainStock: '' as number | '',
+          lowStockThreshold: '' as number | '',
+          unit: '',
+          purchasePrice: '' as number | '',
+          sellingPrice: '' as number | ''
         });
+        setErrors({});
         
         // Focus first field
         setTimeout(() => {
@@ -185,10 +246,23 @@ const Inventory: React.FC = () => {
       } else {
         setModalOpen(false);
         setEditingItem(null);
-        setFormData({ name: '', category: '', brand: '', openingBalance: 0, lowStockThreshold: 5 });
+        setFormData({ 
+          name: '', 
+          category: '', 
+          brand: '', 
+          openingBalance: '' as number | '', 
+          mainStock: '' as number | '',
+          lowStockThreshold: '' as number | '',
+          unit: '',
+          purchasePrice: '' as number | '',
+          sellingPrice: '' as number | ''
+        });
+        setErrors({});
       }
     } catch (error) {
       console.error("Error saving item:", error);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -399,7 +473,11 @@ const Inventory: React.FC = () => {
                               category: item.category, 
                               brand: item.brand, 
                               openingBalance: item.openingBalance,
-                              lowStockThreshold: item.lowStockThreshold || 5
+                              mainStock: item.mainStock,
+                              lowStockThreshold: item.lowStockThreshold,
+                              unit: item.unit || '',
+                              purchasePrice: item.purchasePrice,
+                              sellingPrice: item.sellingPrice
                             });
                             setModalOpen(true);
                           }}
@@ -573,8 +651,31 @@ const Inventory: React.FC = () => {
                   <X className="w-6 h-6" />
                 </button>
               </div>
-              <form onSubmit={(e) => handleSave(e, false)} className="p-6 space-y-4">
+              <form onSubmit={(e) => handleSave(e, false)} className="p-6 space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar">
                 <AnimatePresence>
+                  {Object.keys(errors).length > 0 && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      className="bg-red-50 text-red-700 p-3 rounded-lg border border-red-100 mb-4 flex items-center gap-2"
+                    >
+                      <AlertCircle className="w-4 h-4" />
+                      <p className="text-[10px] font-black uppercase tracking-widest">
+                        Please fill in all required fields before saving.
+                      </p>
+                    </motion.div>
+                  )}
+                  {!navigator.onLine && (
+                    <motion.div 
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      className="bg-amber-50 text-amber-700 p-3 rounded-lg border border-amber-100 mb-4"
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-widest text-center">
+                        You are offline. Your data will be saved when connection is restored.
+                      </p>
+                    </motion.div>
+                  )}
                   {showToast && (
                     <motion.div
                       initial={{ opacity: 0, y: -10 }}
@@ -587,88 +688,157 @@ const Inventory: React.FC = () => {
                     </motion.div>
                   )}
                 </AnimatePresence>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-1">Item Name</label>
+                <div id="field-name">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">Item Name <span className="text-red-500">*</span></label>
                   <input
-                    required
                     ref={nameInputRef}
                     type="text"
                     value={formData.name}
                     onChange={e => setFormData({...formData, name: e.target.value})}
                     placeholder="e.g. BKC A1+"
-                    className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                    className={getInputFieldClass('name', formData.name)}
                   />
+                  {errors.name && <p className="text-red-400 text-xs mt-1">{errors.name}</p>}
                 </div>
                 <div className="grid grid-cols-2 gap-4">
-                  <div>
+                  <div id="field-category">
                     <div className="flex justify-between items-center mb-1">
-                      <label className="text-sm font-bold text-slate-700">Category</label>
+                      <label className="text-sm font-bold text-slate-700">Category <span className="text-red-500">*</span></label>
                       <Link to="/categories" className="text-[10px] text-indigo-600 hover:underline font-bold">MANAGE</Link>
                     </div>
                     <select
-                      required
                       value={formData.category}
                       onChange={e => setFormData({...formData, category: e.target.value})}
-                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm bg-white"
+                      className={getInputFieldClass('category', formData.category)}
                     >
                       <option value="">Select...</option>
                       {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
                       {categories.length === 0 && <option disabled>No categories found</option>}
                     </select>
+                    {errors.category && <p className="text-red-400 text-xs mt-1">{errors.category}</p>}
                   </div>
-                  <div>
+                  <div id="field-brand">
                     <div className="flex justify-between items-center mb-1">
-                      <label className="text-sm font-bold text-slate-700">Brand</label>
+                      <label className="text-sm font-bold text-slate-700">Brand <span className="text-red-500">*</span></label>
                       <Link to="/brands" className="text-[10px] text-indigo-600 hover:underline font-bold">MANAGE</Link>
                     </div>
                     <select
-                      required
                       value={formData.brand}
                       onChange={e => setFormData({...formData, brand: e.target.value})}
-                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm bg-white"
+                      className={getInputFieldClass('brand', formData.brand)}
                     >
                       <option value="">Select...</option>
                       {brands.map(b => <option key={b.id} value={b.name}>{b.name}</option>)}
                       {brands.length === 0 && <option disabled>No brands found</option>}
                     </select>
+                    {errors.brand && <p className="text-red-400 text-xs mt-1">{errors.brand}</p>}
                   </div>
                 </div>
+
                 <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Opening Balance</label>
+                  <div id="field-unit">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Unit <span className="text-red-500">*</span></label>
                     <input
-                      required
-                      type="number"
-                      value={formData.openingBalance}
-                      onChange={e => setFormData({...formData, openingBalance: parseInt(e.target.value) || 0})}
-                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm"
+                      type="text"
+                      value={formData.unit}
+                      onChange={e => setFormData({...formData, unit: e.target.value})}
+                      placeholder="e.g. pieces, kg, boxes"
+                      className={getInputFieldClass('unit', formData.unit)}
                     />
+                    {errors.unit && <p className="text-red-400 text-xs mt-1">{errors.unit}</p>}
                   </div>
-                  <div>
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Low Stock Limit</label>
+                  <div id="field-lowStockThreshold">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Low Stock Limit <span className="text-red-500">*</span></label>
                     <input
-                      required
                       type="number"
                       value={formData.lowStockThreshold}
-                      onChange={e => setFormData({...formData, lowStockThreshold: parseInt(e.target.value) || 0})}
-                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm"
+                      onChange={e => setFormData({...formData, lowStockThreshold: e.target.value === '' ? '' : parseInt(e.target.value)})}
+                      placeholder="e.g. 5"
+                      className={getInputFieldClass('lowStockThreshold', formData.lowStockThreshold, true, 0)}
                     />
+                    {errors.lowStockThreshold && <p className="text-red-400 text-xs mt-1">{errors.lowStockThreshold}</p>}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div id="field-openingBalance">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Opening Balance <span className="text-red-500">*</span></label>
+                    <input
+                      type="number"
+                      value={formData.openingBalance}
+                      onChange={e => setFormData({...formData, openingBalance: e.target.value === '' ? '' : parseInt(e.target.value)})}
+                      placeholder="e.g. 100"
+                      className={getInputFieldClass('openingBalance', formData.openingBalance, true, 0)}
+                    />
+                    {errors.openingBalance && <p className="text-red-400 text-xs mt-1">{errors.openingBalance}</p>}
+                  </div>
+                  <div id="field-mainStock">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Main Stock (Current) <span className="text-red-500">*</span></label>
+                    <input
+                      type="number"
+                      value={formData.mainStock}
+                      onChange={e => setFormData({...formData, mainStock: e.target.value === '' ? '' : parseInt(e.target.value)})}
+                      placeholder="e.g. 50"
+                      className={getInputFieldClass('mainStock', formData.mainStock, true, 0)}
+                    />
+                    {errors.mainStock && <p className="text-red-400 text-xs mt-1">{errors.mainStock}</p>}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div id="field-purchasePrice">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Purchase Price <span className="text-red-500">*</span></label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={formData.purchasePrice}
+                      onChange={e => setFormData({...formData, purchasePrice: e.target.value === '' ? '' : parseFloat(e.target.value)})}
+                      placeholder="e.g. 250"
+                      className={getInputFieldClass('purchasePrice', formData.purchasePrice, true, 0.01)}
+                    />
+                    {errors.purchasePrice && <p className="text-red-400 text-xs mt-1">{errors.purchasePrice}</p>}
+                  </div>
+                  <div id="field-sellingPrice">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Selling Price <span className="text-red-500">*</span></label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={formData.sellingPrice}
+                      onChange={e => setFormData({...formData, sellingPrice: e.target.value === '' ? '' : parseFloat(e.target.value)})}
+                      placeholder="e.g. 300"
+                      className={getInputFieldClass('sellingPrice', formData.sellingPrice, true, 0.01)}
+                    />
+                    {errors.sellingPrice && <p className="text-red-400 text-xs mt-1">{errors.sellingPrice}</p>}
                   </div>
                 </div>
                 <div className="flex flex-col sm:flex-row gap-3 pt-2">
                   <button
                     type="submit"
-                    className="flex-1 py-4 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-[0.98]"
+                    disabled={isSubmitting}
+                    className="flex-1 py-4 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-[0.98] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
-                    {editingItem ? 'UPDATE ITEM CONFIG' : 'CREATE NEW ITEM'}
+                    {isSubmitting ? (
+                      <>
+                        <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                        SAVING...
+                      </>
+                    ) : (
+                      editingItem ? 'UPDATE ITEM CONFIG' : 'CREATE NEW ITEM'
+                    )}
                   </button>
                   {!editingItem && (
                     <button
                       type="button"
+                      disabled={isSubmitting}
                       onClick={(e) => handleSave(e, true)}
-                      className="flex-1 py-4 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 active:scale-[0.98]"
+                      className="flex-1 py-4 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 active:scale-[0.98] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
-                      SAVE & ADD NEXT
+                      {isSubmitting ? (
+                        <>
+                          <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                          SAVING...
+                        </>
+                      ) : 'SAVE & ADD NEXT'}
                     </button>
                   )}
                 </div>

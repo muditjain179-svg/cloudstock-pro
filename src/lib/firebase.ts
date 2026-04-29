@@ -1,7 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { initializeFirestore, doc, getDocFromServer, enableMultiTabIndexedDbPersistence } from 'firebase/firestore';
-
 const firebaseConfig = {
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
@@ -12,16 +11,12 @@ const firebaseConfig = {
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
-// ... existing code ...
 const app = initializeApp(firebaseConfig);
 
 // Optimize for unstable networking environments
-const dbId = import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID;
-const finalDbId = (!dbId || dbId.includes('your-')) ? '(default)' : dbId;
-
-export const db = initializeFirestore(app, {
+const db = initializeFirestore(app, {
   experimentalForceLongPolling: true,
-}, finalDbId);
+}, import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || '(default)');
 
 // Enable persistence
 enableMultiTabIndexedDbPersistence(db).catch((err) => {
@@ -34,25 +29,8 @@ enableMultiTabIndexedDbPersistence(db).catch((err) => {
     }
 });
 
+export { db };
 export const auth = getAuth(app);
-
-// Connectivity check
-async function testConnection() {
-  try {
-    // Only attempt if we have what looks like valid config
-    if (!firebaseConfig.projectId?.includes('your-')) {
-      await getDocFromServer(doc(db, '_connection_test_', 'test'));
-      console.log("Firebase connection successful.");
-    }
-  } catch (error) {
-    if (error instanceof Error && (error.message.includes('the client is offline') || error.message.includes('unavailable'))) {
-      console.error("Firebase is offline or unreachable. Please check your environment variables and project setup.");
-    } else {
-      console.warn("Non-critical Firebase connection check result:", error);
-    }
-  }
-}
-testConnection();
 
 export interface FirestoreErrorInfo {
   error: string;
@@ -90,3 +68,18 @@ export const handleFirestoreError = (error: any, operationType: FirestoreErrorIn
   }
   throw error;
 };
+
+// Connectivity check
+async function testConnection() {
+  try {
+    await getDocFromServer(doc(db, '_connection_test_', 'test'));
+    console.log("Firebase connection successful.");
+  } catch (error) {
+    if (error instanceof Error && (error.message.includes('the client is offline') || error.message.includes('unavailable'))) {
+      console.error("Firebase is offline or unreachable. Please check your project setup.");
+    } else {
+      console.warn("Non-critical Firebase connection check result:", error);
+    }
+  }
+}
+testConnection();

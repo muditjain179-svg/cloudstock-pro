@@ -4,6 +4,7 @@ import {
   onSnapshot, 
   addDoc, 
   updateDoc, 
+  setDoc,
   doc, 
   deleteDoc, 
   query, 
@@ -22,6 +23,7 @@ const Brands: React.FC = () => {
   const [isModalOpen, setModalOpen] = useState(false);
   const [editingBrand, setEditingBrand] = useState<Brand | null>(null);
   const [formData, setFormData] = useState({ name: '' });
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     const q = query(collection(db, 'brands'), orderBy('name'));
@@ -34,17 +36,22 @@ const Brands: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       if (editingBrand) {
         await updateDoc(doc(db, 'brands', editingBrand.id), formData);
       } else {
-        await addDoc(collection(db, 'brands'), formData);
+        const brandId = crypto.randomUUID();
+        await setDoc(doc(db, 'brands', brandId), formData);
       }
       setModalOpen(false);
       setEditingBrand(null);
       setFormData({ name: '' });
     } catch (error) {
       console.error("Error saving brand:", error);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -139,6 +146,19 @@ const Brands: React.FC = () => {
                 <button onClick={() => setModalOpen(false)} className="p-2 hover:bg-gray-200 rounded-full transition-colors"><X className="w-5 h-5" /></button>
               </div>
               <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                <AnimatePresence>
+                  {!navigator.onLine && (
+                    <motion.div 
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      className="bg-amber-50 text-amber-700 p-3 rounded-lg border border-amber-100 mb-2"
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-widest text-center">
+                        You are offline. Your data will be saved when connection is restored.
+                      </p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
                 <div>
                   <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">Brand Name</label>
                   <input 
@@ -151,8 +171,19 @@ const Brands: React.FC = () => {
                   />
                 </div>
                 <div className="pt-4">
-                  <button type="submit" className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-[0.98]">
-                    {editingBrand ? 'UPDATE BRAND' : 'CREATE BRAND'}
+                  <button 
+                    type="submit" 
+                    disabled={isSubmitting}
+                    className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        SAVING...
+                      </>
+                    ) : (
+                      editingBrand ? 'UPDATE BRAND' : 'CREATE BRAND'
+                    )}
                   </button>
                 </div>
               </form>

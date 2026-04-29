@@ -156,7 +156,8 @@ const Transfers: React.FC = () => {
           }, { merge: true });
         }
 
-        const newBillRef = doc(collection(db, 'bills'));
+        const newBillId = crypto.randomUUID();
+        const newBillRef = doc(db, 'bills', newBillId);
         const billPayload = {
           billNumber: `${isOpeningStock ? 'OS' : 'T'}-${Date.now().toString().slice(-6)}`,
           type: isOpeningStock ? 'opening-stock' : 'transfer',
@@ -317,7 +318,7 @@ const Transfers: React.FC = () => {
     if (existing) return;
     setBillData({
       ...billData,
-      items: [...billData.items, { itemId: item.id, name: item.name, quantity: 1, price: 0 }]
+      items: [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: 0 }]
     });
   };
 
@@ -445,17 +446,21 @@ const Transfers: React.FC = () => {
                           max={isOpeningStock ? undefined : (items.find(i => i.id === item.itemId)?.mainStock || 0)}
                           onChange={e => {
                             const newItems = [...billData.items];
-                            const qty = parseInt(e.target.value) || 0;
-                            
-                            if (!isOpeningStock) {
-                              const available = items.find(i => i.id === item.itemId)?.mainStock || 0;
-                              newItems[idx].quantity = Math.min(qty, available);
+                            const val = e.target.value;
+                            if (val === '') {
+                              newItems[idx].quantity = '' as any;
                             } else {
-                              newItems[idx].quantity = qty;
+                              const qty = parseInt(val) || 0;
+                              if (!isOpeningStock) {
+                                const available = items.find(i => i.id === item.itemId)?.mainStock || 0;
+                                newItems[idx].quantity = Math.min(qty, available);
+                              } else {
+                                newItems[idx].quantity = qty;
+                              }
                             }
-                            
                             setBillData({...billData, items: newItems});
                           }}
+                          placeholder="e.g. 50"
                           className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
                         />
                       </div>
@@ -479,6 +484,19 @@ const Transfers: React.FC = () => {
 
         <div className="bg-white p-6 rounded-2xl border shadow-sm h-fit space-y-6">
             <h2 className="font-bold">Summary</h2>
+            <AnimatePresence>
+              {!navigator.onLine && (
+                <motion.div 
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  className="bg-amber-50 text-amber-700 p-3 rounded-lg border border-amber-100 mb-2"
+                >
+                  <p className="text-[10px] font-black uppercase tracking-widest text-center">
+                    You are offline. Your data will be saved when connection is restored.
+                  </p>
+                </motion.div>
+              )}
+            </AnimatePresence>
             <p className="text-sm text-slate-500">
               {isOpeningStock 
                 ? "Opening stock items will be added directly to Salesman Inventory. Main Inventory will NOT be affected."
@@ -558,7 +576,10 @@ const Transfers: React.FC = () => {
                         className="flex-1 py-3 sm:py-4 bg-emerald-600 text-white font-bold rounded-2xl hover:bg-emerald-700 shadow-xl shadow-emerald-100 transition-all active:scale-95 flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs disabled:opacity-50 order-1 sm:order-2"
                       >
                         {isSaving ? (
-                          <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          <>
+                            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            SAVING...
+                          </>
                         ) : (
                           <>
                             <CheckCircle2 className="w-5 h-5" />

@@ -4,6 +4,7 @@ import {
   onSnapshot, 
   addDoc, 
   updateDoc, 
+  setDoc,
   doc, 
   deleteDoc, 
   query, 
@@ -22,6 +23,7 @@ const Suppliers: React.FC = () => {
   const [isModalOpen, setModalOpen] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
   const [formData, setFormData] = useState({ name: '', phone: '' });
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     const q = query(collection(db, 'suppliers'), orderBy('name'));
@@ -32,17 +34,22 @@ const Suppliers: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       if (editingSupplier) {
         await updateDoc(doc(db, 'suppliers', editingSupplier.id), formData);
       } else {
-        await addDoc(collection(db, 'suppliers'), formData);
+        const supplierId = crypto.randomUUID();
+        await setDoc(doc(db, 'suppliers', supplierId), formData);
       }
       setModalOpen(false);
       setEditingSupplier(null);
       setFormData({ name: '', phone: '' });
     } catch (error) {
       console.error("Error saving supplier:", error);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -135,6 +142,19 @@ const Suppliers: React.FC = () => {
                 <button onClick={() => setModalOpen(false)}><X /></button>
               </div>
               <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                <AnimatePresence>
+                  {!navigator.onLine && (
+                    <motion.div 
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      className="bg-amber-50 text-amber-700 p-3 rounded-lg border border-amber-100 mb-2"
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-widest text-center">
+                        You are offline. Your data will be saved when connection is restored.
+                      </p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-1">Company Name</label>
                   <input required type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full px-4 py-2 border rounded-lg" />
@@ -143,7 +163,20 @@ const Suppliers: React.FC = () => {
                   <label className="block text-sm font-bold text-slate-700 mb-1">Contact Phone</label>
                   <input required type="tel" value={formData.phone} onChange={e => setFormData({...formData, phone: e.target.value})} className="w-full px-4 py-2 border rounded-lg" />
                 </div>
-                <button type="submit" className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl">{editingSupplier ? 'Update' : 'Create'}</button>
+                <button 
+                  type="submit" 
+                  disabled={isSubmitting}
+                  className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      SAVING...
+                    </>
+                  ) : (
+                    editingSupplier ? 'Update' : 'Create'
+                  )}
+                </button>
               </form>
             </motion.div>
           </div>

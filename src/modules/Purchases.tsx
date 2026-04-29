@@ -4,6 +4,7 @@ import {
   onSnapshot, 
   addDoc, 
   updateDoc, 
+  setDoc,
   doc, 
   query, 
   orderBy, 
@@ -60,14 +61,14 @@ const Purchases: React.FC = () => {
   const [billData, setBillData] = useState<{
     supplier: Supplier | null;
     items: BillItem[];
-    oldDue: number;
-    receivedAmount: number;
+    oldDue: number | '';
+    receivedAmount: number | '';
     status: 'draft' | 'finalized';
   }>({
     supplier: null,
     items: [],
-    oldDue: 0,
-    receivedAmount: 0,
+    oldDue: '',
+    receivedAmount: '',
     status: 'draft'
   });
 
@@ -99,16 +100,16 @@ const Purchases: React.FC = () => {
     return () => { unsubBills(); unsubItems(); unsubSuppliers(); };
   }, [user]);
 
-  const calculateSubtotal = () => billData.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-  const calculateGrandTotal = () => calculateSubtotal() + billData.oldDue;
-  const calculateNewBalance = () => calculateGrandTotal() - billData.receivedAmount;
+  const calculateSubtotal = () => billData.items.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0);
+  const calculateGrandTotal = () => calculateSubtotal() + Number(billData.oldDue || 0);
+  const calculateNewBalance = () => calculateGrandTotal() - Number(billData.receivedAmount || 0);
 
   const addItemToBill = (item: Item) => {
     const existing = billData.items.find(i => i.itemId === item.id);
     if (existing) return;
     setBillData({
       ...billData,
-      items: [...billData.items, { itemId: item.id, name: item.name, quantity: 1, price: 0 }]
+      items: [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: '' as any }]
     });
   };
 
@@ -120,14 +121,20 @@ const Purchases: React.FC = () => {
 
   const handleAddSupplier = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSaving) return;
+    setIsSaving(true);
     try {
-      const docRef = await addDoc(collection(db, 'suppliers'), newSupplier);
-      const s = { id: docRef.id, ...newSupplier };
+      const supplierId = crypto.randomUUID();
+      const supplierRef = doc(db, 'suppliers', supplierId);
+      await setDoc(supplierRef, newSupplier);
+      const s = { id: supplierId, ...newSupplier } as any;
       setBillData({ ...billData, supplier: s });
       setSupplierModalOpen(false);
       setNewSupplier({ name: '', phone: '' });
     } catch (error) {
       alert("Error adding supplier");
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -147,13 +154,13 @@ const Purchases: React.FC = () => {
           customer_name: billData.supplier!.name,
           items: billData.items.map(i => ({
             item_name: i.name,
-            rate: i.price,
-            qty: i.quantity,
-            subtotal: i.price * i.quantity
+            rate: Number(i.price),
+            qty: Number(i.quantity),
+            subtotal: Number(i.price) * Number(i.quantity)
           })),
           total_amount: calculateSubtotal(),
-          old_due: billData.oldDue,
-          receipt_amount: billData.receivedAmount,
+          old_due: Number(billData.oldDue || 0),
+          receipt_amount: Number(billData.receivedAmount || 0),
           new_balance: calculateNewBalance()
         });
         const url = URL.createObjectURL(blob);
@@ -192,7 +199,8 @@ const Purchases: React.FC = () => {
           }
         }
 
-        const newBillRef = doc(collection(db, 'bills'));
+        const newBillId = crypto.randomUUID();
+        const newBillRef = doc(db, 'bills', newBillId);
         const newBillData: any = {
           billNumber: `P-${Date.now().toString().slice(-6)}`,
           type: 'purchase',
@@ -200,10 +208,14 @@ const Purchases: React.FC = () => {
           entityId: billData.supplier!.id,
           entityName: billData.supplier!.name,
           entityPhone: billData.supplier!.phone,
-          items: billData.items,
+          items: billData.items.map(i => ({
+            ...i,
+            quantity: Number(i.quantity),
+            price: Number(i.price)
+          })),
           subtotal: calculateSubtotal(),
-          oldDue: billData.oldDue,
-          receivedAmount: billData.receivedAmount,
+          oldDue: Number(billData.oldDue || 0),
+          receivedAmount: Number(billData.receivedAmount || 0),
           totalAmount: calculateGrandTotal(),
           newBalance: calculateNewBalance(),
           createdBy: user.id,
@@ -223,20 +235,20 @@ const Purchases: React.FC = () => {
           customer_name: createdBill!.entityName,
           items: createdBill!.items.map(i => ({
             item_name: i.name,
-            rate: i.price,
-            qty: i.quantity,
-            subtotal: i.price * i.quantity
+            rate: Number(i.price),
+            qty: Number(i.quantity),
+            subtotal: Number(i.price) * Number(i.quantity)
           })),
           total_amount: createdBill!.subtotal,
-          old_due: createdBill!.oldDue,
-          receipt_amount: createdBill!.receivedAmount,
-          new_balance: createdBill!.newBalance
+          old_due: Number(createdBill!.oldDue || 0),
+          receipt_amount: Number(createdBill!.receivedAmount || 0),
+          new_balance: Number(createdBill!.newBalance || 0)
         });
         setPdfPreviewUrl(URL.createObjectURL(blob));
         setLastFinalizedBill(createdBill);
       } else {
         setIsCreating(false);
-        setBillData({ supplier: null, items: [], oldDue: 0, receivedAmount: 0, status: 'draft' });
+        setBillData({ supplier: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
       }
     } catch (error: any) {
       alert(error.message || "Error saving purchase");
@@ -484,7 +496,8 @@ const Purchases: React.FC = () => {
                         type="number" 
                         value={item.quantity}
                         min="1"
-                        onChange={(e) => updateBillItem(idx, { quantity: parseInt(e.target.value) || 0 })}
+                        onChange={(e) => updateBillItem(idx, { quantity: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
+                        placeholder="e.g. 25"
                         className="w-full px-2 py-1 border rounded-md focus:ring-2 focus:ring-indigo-500 outline-none font-bold"
                       />
                     </div>
@@ -493,7 +506,8 @@ const Purchases: React.FC = () => {
                       <input 
                         type="number" 
                         value={item.price}
-                        onChange={(e) => updateBillItem(idx, { price: parseInt(e.target.value) || 0 })}
+                        onChange={(e) => updateBillItem(idx, { price: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
+                        placeholder="e.g. 250"
                         className="w-full px-2 py-1 border rounded-md focus:ring-2 focus:ring-indigo-500 outline-none font-bold text-indigo-600"
                       />
                     </div>
@@ -525,8 +539,9 @@ const Purchases: React.FC = () => {
                     <input 
                       type="number"
                       value={billData.oldDue}
-                      onChange={(e) => setBillData({ ...billData, oldDue: parseFloat(e.target.value) || 0 })}
+                      onChange={(e) => setBillData({ ...billData, oldDue: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                       className="w-full pl-8 pr-4 py-2 bg-slate-50 border border-slate-100 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      placeholder="e.g. 500"
                     />
                   </div>
                 </div>
@@ -543,8 +558,9 @@ const Purchases: React.FC = () => {
                     <input 
                       type="number"
                       value={billData.receivedAmount}
-                      onChange={(e) => setBillData({ ...billData, receivedAmount: parseFloat(e.target.value) || 0 })}
+                      onChange={(e) => setBillData({ ...billData, receivedAmount: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                       className="w-full pl-8 pr-4 py-2 bg-emerald-50/30 border border-emerald-100 rounded-lg text-sm font-bold text-emerald-700 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                      placeholder="e.g. 300"
                     />
                   </div>
                 </div>
@@ -556,6 +572,19 @@ const Purchases: React.FC = () => {
               </div>
 
               <div className="space-y-3">
+                <AnimatePresence>
+                  {!navigator.onLine && (
+                    <motion.div 
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      className="bg-amber-50 text-amber-700 p-3 rounded-lg border border-amber-100 mb-4"
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-widest text-center">
+                        You are offline. Your data will be saved when connection is restored.
+                      </p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
                 <button 
                   onClick={() => handleSaveBill('finalized')}
                   disabled={isSaving}
@@ -617,8 +646,17 @@ const Purchases: React.FC = () => {
                     />
                   </div>
                   <div className="pt-4">
-                    <button type="submit" className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-[0.98] uppercase tracking-widest text-xs">
-                      SAVE SUPPLIER
+                    <button 
+                      type="submit" 
+                      disabled={isSaving}
+                      className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-[0.98] uppercase tracking-widest text-xs flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                      {isSaving ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          SAVING...
+                        </>
+                      ) : 'SAVE SUPPLIER'}
                     </button>
                   </div>
                 </form>
@@ -717,7 +755,7 @@ const Purchases: React.FC = () => {
                         Share Bill
                       </button>
                       <button 
-                        onClick={() => { setIsCreating(false); setBillData({ supplier: null, items: [], oldDue: 0, receivedAmount: 0, status: 'draft' }); setShowFinalizeOverlay(false); setLastFinalizedBill(null); }}
+                        onClick={() => { setIsCreating(false); setBillData({ supplier: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' }); setShowFinalizeOverlay(false); setLastFinalizedBill(null); }}
                         className="py-3 sm:py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-black transition-all uppercase tracking-widest text-[10px] sm:text-xs"
                       >
                         Finish

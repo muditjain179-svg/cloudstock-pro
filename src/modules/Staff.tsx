@@ -194,6 +194,19 @@ const Staff: React.FC = () => {
                 </div>
 
                 <form onSubmit={handleCreateStaff} className="space-y-4">
+                  <AnimatePresence>
+                    {!navigator.onLine && (
+                      <motion.div 
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        className="bg-amber-50 text-amber-700 p-3 rounded-lg border border-amber-100 mb-2"
+                      >
+                        <p className="text-[10px] font-black uppercase tracking-widest text-center">
+                          You are offline. Your data will be saved when connection is restored.
+                        </p>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                   {createError && (
                     <div className="p-3 bg-rose-50 border border-rose-100 rounded-xl flex gap-2 items-center">
                       <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
@@ -277,9 +290,14 @@ const Staff: React.FC = () => {
 
                   <button 
                     disabled={isCreating}
-                    className="w-full py-4 mt-6 bg-indigo-600 text-white text-[10px] font-black uppercase tracking-[0.2em] rounded-xl hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 active:scale-[0.98] disabled:opacity-50"
+                    className="w-full py-4 mt-6 bg-indigo-600 text-white text-[10px] font-black uppercase tracking-[0.2em] rounded-xl hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2"
                   >
-                    {isCreating ? 'Creating system account...' : 'Create Employee Account'}
+                    {isCreating ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        CREATING ACCOUNT...
+                      </>
+                    ) : 'Create Employee Account'}
                   </button>
                 </form>
               </div>
