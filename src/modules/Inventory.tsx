@@ -13,7 +13,7 @@ import {
   where
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { useAuth } from '../App';
+import { useAuth } from '../contexts/AuthContext';
 import { Item, SalesmanInventory, Brand, Category, UserProfile } from '../types';
 import { 
   Plus, 

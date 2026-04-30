@@ -14,7 +14,7 @@ import {
   where
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { useAuth } from '../App';
+import { useAuth } from '../contexts/AuthContext';
 import { Bill, Item, Supplier, BillItem } from '../types';
 import { 
   Plus, 
@@ -229,12 +229,17 @@ const Purchases: React.FC = () => {
           date_issued: new Date().toLocaleDateString(),
           invoice_no: 'DRAFT',
           customer_name: billData.supplier!.name,
-          items: billData.items.map(i => ({
-            item_name: i.name,
-            rate: Number(i.price),
-            qty: Number(i.quantity),
-            subtotal: Number(i.price) * Number(i.quantity)
-          })),
+          items: billData.items.map(i => {
+            const itemInfo = items.find(item => item.id === i.itemId);
+            return {
+              item_name: i.name,
+              brand: itemInfo?.brand || '-',
+              rate: Number(i.price),
+              qty: Number(i.quantity),
+              unit: itemInfo?.unit || 'pcs',
+              subtotal: Number(i.price) * Number(i.quantity)
+            };
+          }),
           total_amount: calculateSubtotal(),
           old_due: Number(billData.oldDue || 0),
           receipt_amount: Number(billData.receivedAmount || 0),
@@ -318,12 +323,17 @@ const Purchases: React.FC = () => {
           date_issued: new Date(createdBill!.date.seconds * 1000).toLocaleDateString(),
           invoice_no: createdBill!.billNumber,
           customer_name: createdBill!.entityName,
-          items: createdBill!.items.map(i => ({
-            item_name: i.name,
-            rate: Number(i.price),
-            qty: Number(i.quantity),
-            subtotal: Number(i.price) * Number(i.quantity)
-          })),
+          items: createdBill!.items.map(i => {
+            const itemInfo = items.find(item => item.id === i.itemId);
+            return {
+              item_name: i.name,
+              brand: itemInfo?.brand || '-',
+              rate: Number(i.price),
+              qty: Number(i.quantity),
+              unit: itemInfo?.unit || 'pcs',
+              subtotal: Number(i.price) * Number(i.quantity)
+            };
+          }),
           total_amount: createdBill!.subtotal,
           old_due: Number(createdBill!.oldDue || 0),
           receipt_amount: Number(createdBill!.receivedAmount || 0),
@@ -352,12 +362,17 @@ const Purchases: React.FC = () => {
       date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
       invoice_no: bill.billNumber,
       customer_name: bill.entityName,
-      items: bill.items.map(i => ({
-        item_name: i.name,
-        rate: i.price,
-        qty: i.quantity,
-        subtotal: i.price * i.quantity
-      })),
+      items: bill.items.map(i => {
+        const itemInfo = items.find(item => item.id === i.itemId);
+        return {
+          item_name: i.name,
+          brand: itemInfo?.brand || '-',
+          rate: i.price,
+          qty: i.quantity,
+          unit: itemInfo?.unit || 'pcs',
+          subtotal: i.price * i.quantity
+        };
+      }),
       total_amount: bill.subtotal || 0,
       old_due: bill.oldDue || 0,
       receipt_amount: bill.receivedAmount || 0,
@@ -1023,12 +1038,17 @@ const Purchases: React.FC = () => {
                       date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
                       invoice_no: bill.billNumber,
                       customer_name: bill.entityName,
-                      items: bill.items.map(i => ({
-                        item_name: i.name,
-                        rate: i.price,
-                        qty: i.quantity,
-                        subtotal: i.price * i.quantity
-                      })),
+                      items: bill.items.map(i => {
+                        const itemInfo = items.find(item => item.id === i.itemId);
+                        return {
+                          item_name: i.name,
+                          brand: itemInfo?.brand || '-',
+                          rate: i.price,
+                          qty: i.quantity,
+                          unit: itemInfo?.unit || 'pcs',
+                          subtotal: i.price * i.quantity
+                        };
+                      }),
                       total_amount: bill.subtotal || 0,
                       old_due: bill.oldDue || 0,
                       receipt_amount: bill.receivedAmount || 0,

@@ -1,6 +1,7 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import html2canvas from 'html2canvas';
 
 if (typeof window !== 'undefined') {
@@ -31,12 +32,13 @@ export async function generateInvoicePDF(data: {
   date_issued: string;
   invoice_no: string;
   customer_name: string;
-  items: Array<{ item_name: string; rate: number; qty: number; subtotal: number }>;
+  items: Array<{ item_name: string; rate: number; qty: number; subtotal: number; unit?: string; brand?: string }>;
   total_amount: number;
   old_due: number;
   receipt_amount: number;
   new_balance: number;
 }) {
+  // Keep the original HTML template for reference and potential use in other parts of the app
   const html = `
     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #111; padding: 0; background-color: #fff; width: 600px; margin: 0 auto; line-height: 1.4;">
       <div style="background: #fff; border-radius: 0; box-shadow: none; border-top: 8px solid ${data.themeColor}; overflow: hidden; border-left: 1px solid #eee; border-right: 1px solid #eee; border-bottom: 1px solid #eee;">
@@ -121,40 +123,180 @@ export async function generateInvoicePDF(data: {
     </div>
   `;
 
-  // Use the DOM-to-Canvas approach for perfect rendering
-  const container = document.createElement('div');
-  container.style.position = 'absolute';
-  container.style.left = '-9999px';
-  container.style.top = '0';
-  container.innerHTML = html;
-  document.body.appendChild(container);
-
+  const doc = new jsPDF();
+  
+  // 1. Top Red Accent Line
+  doc.setFillColor(239, 68, 68); // Red
+  doc.rect(0, 0, 210, 2, 'F');
+  
+  // 2. Main Black Header Section
+  doc.setFillColor(17, 24, 39); // Deep Black/Gray
+  doc.rect(0, 2, 210, 80, 'F');
+  
+  // Logo in Black Section
   try {
-    const canvas = await html2canvas(container, {
-      scale: 2, // High resolution
-      useCORS: true,
-      logging: false,
-      backgroundColor: '#ffffff'
-    });
-
-    const imgData = canvas.toDataURL('image/jpeg', 1.0);
-    const pdf = new jsPDF({
-      orientation: 'p',
-      unit: 'pt',
-      format: 'a4'
-    });
-
-    const imgProps = pdf.getImageProperties(imgData);
-    const pdfWidth = pdf.internal.pageSize.getWidth();
-    const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
-
-    pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
-    document.body.removeChild(container);
-    return pdf.output('blob');
-  } catch (error) {
-    document.body.removeChild(container);
-    throw error;
+    const imgData = '/LOGO.png';
+    const imgProps = doc.getImageProperties(imgData);
+    const targetHeight = 45; // Increased further
+    const targetWidth = (imgProps.width * targetHeight) / imgProps.height;
+    // Align logo
+    doc.addImage(imgData, 'PNG', 20, 8, targetWidth, targetHeight);
+  } catch (e) {
+    // Fallback
+    try {
+      doc.addImage('/LOGO.png', 'PNG', 20, 8, 45, 45);
+    } catch (e2) {}
   }
+  
+  // Invoice Details (Right Aligned in Black Section)
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Date Issued:', 160, 25);
+  doc.text('Invoice No:', 160, 35);
+  
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(200, 200, 200);
+  doc.text(data.date_issued, 196, 25, { align: 'right' });
+  doc.text(data.invoice_no, 196, 35, { align: 'right' });
+  
+  // Title & Salesman (Inside Black Section)
+  doc.setTextColor(239, 68, 68); // Red Title
+  doc.setFontSize(22);
+  doc.setFont('helvetica', 'bold');
+  doc.text(data.title.toUpperCase(), 14, 65);
+  
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'bold'); // Made Bold
+  doc.text(`Issued By: ${data.salesman_name}`, 14, 73);
+  
+  // 3. Thick Red Divider
+  doc.setFillColor(239, 68, 68);
+  doc.rect(0, 82, 210, 2, 'F');
+  
+  // 4. Bill To Section
+  doc.setTextColor(239, 68, 68);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.text('BILL TO', 14, 98);
+  
+  doc.setTextColor(17, 24, 39);
+  doc.setFontSize(16);
+  doc.text(data.customer_name.toUpperCase(), 14, 108);
+  
+  // 5. Items Table
+  autoTable(doc, {
+    startY: 115,
+    head: [['ITEM', 'RATE', 'QTY', 'SUBTOTAL']],
+    body: data.items.map(item => [
+      item.item_name,
+      `Rs. ${item.rate.toFixed(2)}`,
+      item.qty,
+      `Rs. ${item.subtotal.toFixed(2)}`
+    ]),
+    columnStyles: {
+      0: { cellWidth: 'auto' },
+      1: { cellWidth: 35, halign: 'right' },
+      2: { cellWidth: 25, halign: 'center' },
+      3: { cellWidth: 40, halign: 'right' },
+    },
+    styles: {
+      fontSize: 9,
+      cellPadding: 4,
+      textColor: [50, 50, 50],
+    },
+    headStyles: {
+      fillColor: [17, 24, 39],
+      textColor: 255,
+      fontStyle: 'bold',
+      halign: 'left' // ITEM left, others overridden if needed
+    },
+    didParseCell: (d) => {
+      if (d.section === 'head' && d.column.index > 0) d.cell.styles.halign = 'right';
+      if (d.section === 'head' && d.column.index === 2) d.cell.styles.halign = 'center';
+    },
+    margin: { left: 14, right: 14 },
+    didDrawPage: (d) => {
+      // Small page number footer
+      doc.setFontSize(8);
+      doc.setTextColor(150);
+      doc.text(`Page ${d.pageNumber}`, 196, doc.internal.pageSize.height - 10, { align: 'right' });
+    }
+  });
+  
+  // 6. Footer / Totals Section
+  const finalY = (doc as any).lastAutoTable.finalY + 15;
+  const pageHeight = doc.internal.pageSize.height;
+
+  const printTotals = (y: number) => {
+    const rightX = 196;
+    const labelX = 140;
+    
+    doc.setFontSize(10);
+    doc.setTextColor(80, 80, 80);
+    doc.setFont('helvetica', 'normal');
+    
+    doc.text('Total Amount', labelX, y);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(17, 24, 39);
+    doc.text(`Rs. ${data.total_amount.toFixed(2)}`, rightX, y, { align: 'right' });
+    
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(80, 80, 80);
+    doc.text('OLD DUE', labelX, y + 10);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(17, 24, 39);
+    doc.text(`Rs. ${data.old_due.toFixed(2)}`, rightX, y + 10, { align: 'right' });
+    
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(80, 80, 80);
+    doc.text('RECEIPTS', labelX, y + 20);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(17, 24, 39);
+    doc.text(`-Rs. ${data.receipt_amount.toFixed(2)}`, rightX, y + 20, { align: 'right' });
+    
+    // Total Box (New Bal)
+    doc.setFillColor(254, 242, 242); // Light Red Background
+    doc.rect(95, y + 25, 105, 18, 'F');
+    doc.setDrawColor(239, 68, 68);
+    doc.setLineWidth(0.8);
+    doc.line(95, y + 25, 200, y + 25);
+    doc.line(95, y + 43, 200, y + 43);
+    
+    doc.setTextColor(239, 68, 68);
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text('NEW BAL', 100, y + 36);
+    doc.text(`Rs. ${data.new_balance.toFixed(2)}`, rightX, y + 36, { align: 'right' });
+    
+    // Bottom Signature / Info
+    const signatureY = Math.max(y + 65, pageHeight - 40);
+    doc.setDrawColor(220, 220, 220);
+    doc.line(14, signatureY, 196, signatureY);
+    
+    doc.setFontSize(14);
+    doc.setTextColor(239, 68, 68);
+    doc.text('THANK YOU', 105, signatureY + 12, { align: 'center' });
+    
+    doc.setFontSize(10);
+    doc.setTextColor(17, 24, 39);
+    doc.setFont('helvetica', 'bold');
+    doc.text('CLOUDSTOCK PRO', 105, signatureY + 20, { align: 'center' });
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(120, 120, 120);
+    doc.text('9829610973, 9928448800', 105, signatureY + 26, { align: 'center' });
+  };
+  
+  if (finalY + 60 > pageHeight - 20) {
+    doc.addPage();
+    printTotals(30);
+  } else {
+    printTotals(finalY);
+  }
+  
+  return doc.output('blob');
 }
 
 // Transfer PDF Generation Helper (Green Theme, Simplified)

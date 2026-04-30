@@ -1,28 +1,10 @@
-import React, { useState, useEffect, createContext, useContext, lazy, Suspense } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate, useLocation } from 'react-router-dom';
-import { onAuthStateChanged, signOut, GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { auth, db } from './lib/firebase';
-import { UserProfile, UserRole } from './types';
-import { 
-  LayoutDashboard, 
-  Package, 
-  ShoppingCart, 
-  Truck, 
-  Users, 
-  LogOut, 
-  Menu, 
-  X,
-  Plus,
-  AlertTriangle,
-  Tag,
-  Layers,
-  Bell,
-  Wifi,
-  WifiOff
-} from 'lucide-react';
+import { LogOut, LayoutDashboard, Package, ShoppingCart, Truck, Users, Menu, X, Tag, Layers, Wifi, WifiOff, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { collection, onSnapshot } from 'firebase/firestore';
+import { db } from './lib/firebase';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 
 // Modules
 const Dashboard = lazy(() => import('./modules/Dashboard'));
@@ -35,259 +17,6 @@ const Transfers = lazy(() => import('./modules/Transfers'));
 const Brands = lazy(() => import('./modules/Brands'));
 const Categories = lazy(() => import('./modules/Categories'));
 const Staff = lazy(() => import('./modules/Staff'));
-
-// Auth Context
-interface AuthContextType {
-  user: UserProfile | null;
-  loading: boolean;
-  signIn: () => Promise<void>;
-  signInWithEmail: (email: string, pass: string) => Promise<void>;
-  signUpWithEmail: (email: string, pass: string, name: string) => Promise<void>;
-  logout: () => Promise<void>;
-}
-
-const AuthContext = createContext<AuthContextType | null>(null);
-
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (!context) throw new Error('useAuth must be used within an AuthProvider');
-  return context;
-};
-
-const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<UserProfile | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [isSigningIn, setIsSigningIn] = useState(false);
-  const [updateAvailable, setUpdateAvailable] = useState(false);
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [showSyncStatus, setShowSyncStatus] = useState(false);
-
-  useEffect(() => {
-    const handleOnline = () => {
-      setIsOnline(true);
-      setShowSyncStatus(true);
-      setTimeout(() => setShowSyncStatus(false), 3000);
-    };
-    const handleOffline = () => {
-      setIsOnline(false);
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    // Service Worker update detection
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.getRegistration().then(reg => {
-        if (reg) {
-          // Check for waiting worker on load
-          if (reg.waiting) {
-            setUpdateAvailable(true);
-          }
-
-          reg.addEventListener('updatefound', () => {
-             const newWorker = reg.installing;
-             if (newWorker) {
-               newWorker.addEventListener('statechange', () => {
-                 if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                   setUpdateAvailable(true);
-                 }
-               });
-             }
-          });
-        }
-      });
-    }
-
-    // Auth initialization timeout (Max 10 seconds)
-    const timeoutId = setTimeout(() => {
-      if (loading) {
-        setLoading(false);
-        setAuthError('Authentication initialization timed out. Please check your connection and refresh.');
-      }
-    }, 10000);
-
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      try {
-        if (firebaseUser) {
-          const userRef = doc(db, 'users', firebaseUser.uid);
-          const userDoc = await getDoc(userRef);
-          
-          if (userDoc.exists()) {
-            setUser(userDoc.data() as UserProfile);
-          } else {
-            const profile: UserProfile = {
-              id: firebaseUser.uid,
-              email: firebaseUser.email || '',
-              name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'New User',
-              role: 'salesman'
-            };
-            if (firebaseUser.email === 'muditjain179@gmail.com') {
-              profile.role = 'admin';
-            }
-            await setDoc(userRef, profile);
-            setUser(profile);
-          }
-        } else {
-          setUser(null);
-        }
-      } catch (error: any) {
-        console.error("Auth initialization error:", error);
-        setAuthError(`Auth Error: ${error.message || 'Initialization failed'}`);
-      } finally {
-        setLoading(false);
-        clearTimeout(timeoutId);
-      }
-    }, (error) => {
-      console.error("onAuthStateChanged error:", error);
-      setAuthError(`Connection Error: ${error.message}`);
-      setLoading(false);
-      clearTimeout(timeoutId);
-    });
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-      unsubscribe();
-      clearTimeout(timeoutId);
-    };
-  }, []);
-
-  const signIn = async () => {
-    if (isSigningIn) return;
-    setIsSigningIn(true);
-    setAuthError(null);
-    try {
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: 'select_account' });
-      await signInWithPopup(auth, provider);
-    } catch (error: any) {
-      console.error("Sign in error handle:", error.code, error.message);
-      
-      // Map Firebase error codes to user-friendly messages
-      switch (error.code) {
-        case 'auth/popup-blocked':
-          setAuthError('The sign-in popup was blocked by your browser. Please allow popups for this site and try again.');
-          break;
-        case 'auth/popup-closed-by-user':
-          // Don't show a scary error if they just closed it, maybe they changed their mind
-          // But provide a gentle reminder
-          setAuthError('Sign-in was cancelled because the window was closed. Please click "Sign In" again to continue.');
-          break;
-        case 'auth/cancelled-popup-request':
-          // Usually happens when clicking too fast, can ignore or show quiet message
-          break;
-        case 'auth/unauthorized-domain':
-          setAuthError('This domain is not authorized for Google Sign-In. Please contact admin.');
-          break;
-        case 'auth/network-request-failed':
-          setAuthError('Network error. Please check your internet connection.');
-          break;
-        default:
-          setAuthError(error.message || 'An unexpected authentication error occurred. Please try again.');
-      }
-    } finally {
-      setIsSigningIn(false);
-    }
-  };
-
-  const logout = async () => {
-    setUser(null);
-    await signOut(auth);
-  };
-
-  const signInWithEmail = async (email: string, pass: string) => {
-    setAuthError(null);
-    try {
-      await signInWithEmailAndPassword(auth, email, pass);
-    } catch (error: any) {
-      setAuthError(error.message);
-      throw error;
-    }
-  };
-
-  const signUpWithEmail = async (email: string, pass: string, name: string) => {
-    setAuthError(null);
-    try {
-      const cred = await createUserWithEmailAndPassword(auth, email, pass);
-      const profile: UserProfile = {
-        id: cred.user.uid,
-        email,
-        name,
-        role: email === 'muditjain179@gmail.com' ? 'admin' : 'salesman'
-      };
-      await setDoc(doc(db, 'users', cred.user.uid), profile);
-      setUser(profile);
-    } catch (error: any) {
-      setAuthError(error.message);
-      throw error;
-    }
-  };
-
-  const value = React.useMemo(() => ({ user, loading, signIn, signInWithEmail, signUpWithEmail, logout }), [user, loading, isSigningIn]);
-
-  return (
-    <AuthContext.Provider value={value}>
-      {children}
-      
-      {/* Connection Status Banner */}
-      <AnimatePresence>
-        {!isOnline && (
-          <motion.div 
-            initial={{ y: -50, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            exit={{ y: -50, opacity: 0 }}
-            className="fixed top-0 inset-x-0 z-[10001] bg-rose-600 text-white py-2 px-4 shadow-lg flex items-center justify-center gap-3"
-          >
-            <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
-            <p className="text-xs font-black uppercase tracking-widest">You are offline — changes will sync when connection is restored</p>
-          </motion.div>
-        )}
-        {showSyncStatus && isOnline && (
-          <motion.div 
-            initial={{ y: -50, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            exit={{ y: -50, opacity: 0 }}
-            className="fixed top-0 inset-x-0 z-[10001] bg-emerald-600 text-white py-2 px-4 shadow-lg flex items-center justify-center gap-3"
-          >
-            <div className="w-2 h-2 rounded-full bg-white animate-bounce" />
-            <p className="text-xs font-black uppercase tracking-widest">Back online — syncing data...</p>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {updateAvailable && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[10000] bg-blue-600 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-4 animate-in fade-in slide-in-from-top-4">
-          <p className="text-sm font-bold">New update available!</p>
-          <button 
-            onClick={() => window.location.reload()}
-            className="bg-white text-blue-600 px-3 py-1 rounded-full text-xs font-black hover:bg-blue-50 transition-colors"
-          >
-            REFRESH
-          </button>
-          <button 
-            onClick={() => setUpdateAvailable(false)}
-            className="text-white/70 hover:text-white"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-      {authError && (
-        <div className="fixed bottom-4 right-4 z-[9999] bg-red-50 border border-red-200 p-4 rounded-xl shadow-2xl max-w-sm animate-in slide-in-from-bottom-5">
-           <div className="flex gap-3">
-             <AlertTriangle className="w-5 h-5 text-red-600 shrink-0" />
-             <div>
-               <p className="text-sm font-bold text-red-900">Auth Error</p>
-               <p className="text-xs text-red-700 mt-1">{authError}</p>
-               <button onClick={() => setAuthError(null)} className="text-[10px] uppercase font-black text-red-900 mt-2 hover:underline">Dismiss</button>
-             </div>
-           </div>
-        </div>
-      )}
-    </AuthContext.Provider>
-  );
-};
 
 // Protected Route
 const ProtectedRoute: React.FC<{ children: React.ReactNode; adminOnly?: boolean }> = ({ children, adminOnly }) => {
@@ -339,14 +68,9 @@ const MainLayout: React.FC = () => {
         setLowStockCount(low);
       });
     } else {
-      // For salesman, we need to join item limits with their current stock
-      // This is a bit complex for a single listener, so we'll listen to their inventory
       unsub = onSnapshot(collection(db, `inventories/${user.id}/items`), (snapshot) => {
         const salesmanItems = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        // Note: We don't have the threshold here easily without fetching items too
-        // But we can assume a default for now or just check > 0
-        // For better accuracy, we'd need to fetch items reference data
-        setLowStockCount(salesmanItems.filter((i: any) => i.quantity <= 2).length); // Simple default for salesman
+        setLowStockCount(salesmanItems.filter((i: any) => i.quantity <= 2).length);
       });
     }
     
@@ -398,16 +122,16 @@ const MainLayout: React.FC = () => {
         ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
       `}>
         <div className="flex flex-col h-full">
-          <div className="p-6 border-b border-gray-800 flex items-center justify-between">
-            <div>
+          <div className="p-6 border-b border-gray-800">
+            <div className="flex items-center justify-between">
               <h1 className="text-xl font-bold tracking-tight uppercase">
                 CloudStock
               </h1>
-              <p className="text-[10px] text-gray-400 mt-1 uppercase tracking-widest font-bold">Inventory & Sales</p>
+              <div className={`p-1.5 rounded-lg ${isOnline ? 'bg-emerald-500/10 text-emerald-500' : 'bg-rose-500/10 text-rose-500'}`}>
+                {isOnline ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
+              </div>
             </div>
-            <div className={`p-1.5 rounded-lg ${isOnline ? 'bg-emerald-500/10 text-emerald-500' : 'bg-rose-500/10 text-rose-500'}`}>
-              {isOnline ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
-            </div>
+            <p className="text-[10px] text-gray-400 mt-1 uppercase tracking-widest font-bold">Inventory & Sales</p>
           </div>
 
           <nav className="flex-1 p-4 space-y-2 overflow-y-auto sidebar-scrollbar">

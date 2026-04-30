@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { collection, query, orderBy, limit, onSnapshot, getDocs, where } from 'firebase/firestore';
 import { Link } from 'react-router-dom';
 import { db } from '../lib/firebase';
-import { useAuth } from '../App';
+import { useAuth } from '../contexts/AuthContext';
 import { Bill, Item } from '../types';
 import { 
   TrendingUp, 

@@ -11,7 +11,7 @@ import {
   orderBy
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { useAuth } from '../App';
+import { useAuth } from '../contexts/AuthContext';
 import { Brand } from '../types';
 import { Tag, Search, Edit2, Trash2, X, PlusCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
