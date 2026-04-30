@@ -178,8 +178,8 @@ const Sales: React.FC = () => {
         const newBalance = calculateNewBalance();
         
         const blob = await generateInvoicePDF({
-          title: 'CLOUDSTOCK PRO',
-          themeColor: '#d32f2f',
+          title: 'SALES BILL',
+          themeColor: '#dc2626',
           salesman_name: user?.name || 'Staff',
           date_issued: new Date().toLocaleDateString(),
           invoice_no: 'DRAFT',
@@ -276,8 +276,8 @@ const Sales: React.FC = () => {
         setLastFinalizedBill(createdBill);
         
         const blob = await generateInvoicePDF({
-          title: 'CLOUDSTOCK PRO',
-          themeColor: '#d32f2f',
+          title: 'SALES BILL',
+          themeColor: '#dc2626',
           salesman_name: user?.name || 'Staff',
           date_issued: new Date(createdBill.date.seconds * 1000).toLocaleDateString(),
           invoice_no: createdBill.billNumber,
@@ -337,8 +337,8 @@ const Sales: React.FC = () => {
     
     // Generate PDF Blob
     const pdfBlob = await generateInvoicePDF({
-      title: 'CLOUDSTOCK PRO',
-      themeColor: '#d32f2f',
+      title: 'SALES BILL',
+      themeColor: '#dc2626',
       salesman_name: user?.name || 'Staff',
       date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
       invoice_no: bill.billNumber,

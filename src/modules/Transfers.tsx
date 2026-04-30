@@ -112,14 +112,15 @@ const Transfers: React.FC = () => {
       try {
         const blob = await generateTransferPDF({
           title: isOpeningStock ? 'OPENING STOCK' : 'STOCK TRANSFER',
-          themeColor: isOpeningStock ? '#2563eb' : '#10b981',
+          themeColor: isOpeningStock ? '#ea580c' : '#16a34a',
           admin_name: user?.name || 'Admin',
           date_issued: new Date().toLocaleDateString(),
           transfer_no: 'DRAFT',
           receiver_name: billData.salesman!.name,
           items: billData.items.map(i => ({
             item_name: i.name,
-            qty: i.quantity
+            qty: i.quantity,
+            brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-'
           }))
         });
         const url = URL.createObjectURL(blob);
@@ -191,14 +192,15 @@ const Transfers: React.FC = () => {
         
         const blob = await generateTransferPDF({
           title: isOpeningStock ? 'OPENING STOCK' : 'STOCK TRANSFER',
-          themeColor: isOpeningStock ? '#2563eb' : '#10b981',
+          themeColor: isOpeningStock ? '#ea580c' : '#16a34a',
           admin_name: user?.name || 'Admin',
           date_issued: new Date(createdBill.date.seconds * 1000).toLocaleDateString(),
           transfer_no: createdBill.billNumber,
           receiver_name: createdBill.entityName,
           items: createdBill.items.map(i => ({
             item_name: i.name,
-            qty: i.quantity
+            qty: i.quantity,
+            brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-'
           }))
         });
 
@@ -219,14 +221,15 @@ const Transfers: React.FC = () => {
   const shareTransferPDF = async (bill: Bill) => {
      const blob = await generateTransferPDF({
        title: bill.type === 'opening-stock' ? 'OPENING STOCK' : 'STOCK TRANSFER',
-       themeColor: bill.type === 'opening-stock' ? '#2563eb' : '#10b981',
+       themeColor: bill.type === 'opening-stock' ? '#ea580c' : '#16a34a',
        admin_name: user?.name || 'Admin',
        date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
        transfer_no: bill.billNumber,
        receiver_name: bill.entityName,
        items: bill.items.map(i => ({
          item_name: i.name,
-         qty: i.quantity
+         qty: i.quantity,
+         brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-'
        }))
      });
      
@@ -256,16 +259,18 @@ const Transfers: React.FC = () => {
   };
 
   const downloadTransferPDF = async (bill: Bill) => {
+    const isOpeningStockBill = bill.type === 'opening-stock';
     const blob = await generateTransferPDF({
-      title: 'STOCK TRANSFER',
-      themeColor: '#10b981',
+      title: isOpeningStockBill ? 'OPENING STOCK' : 'STOCK TRANSFER',
+      themeColor: isOpeningStockBill ? '#ea580c' : '#16a34a',
       admin_name: user?.name || 'Admin',
       date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
       transfer_no: bill.billNumber,
       receiver_name: bill.entityName,
       items: bill.items.map(i => ({
         item_name: i.name,
-        qty: i.quantity
+        qty: i.quantity,
+        brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-'
       }))
     });
     
@@ -329,7 +334,14 @@ const Transfers: React.FC = () => {
   const addItemToTransfer = (item: Item) => {
     const existing = billData.items.find(i => i.itemId === item.id);
     if (existing) return;
-    const newItems = [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: 0 }];
+    // We add brand to the local state so it can be used for PDF generation
+    const newItems = [...billData.items, { 
+      itemId: item.id, 
+      name: item.name, 
+      quantity: '' as any, 
+      price: 0,
+      brand: item.brand // Add brand here
+    } as any];
     setBillData({
       ...billData,
       items: newItems

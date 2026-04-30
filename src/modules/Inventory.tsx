@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { 
   collection, 
   onSnapshot, 
@@ -297,14 +299,208 @@ const Inventory: React.FC = () => {
     }
   };
 
-  const sendStockOnWhatsApp = () => {
-    const stockText = items.map(item => {
-      const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
-      return `${item.name}: ${stock} units`;
-    }).join('\n');
+  const generateStockSummaryPDF = () => {
+    // Sort items: Group by Brand (A→Z), then by Name (A→Z) within brand
+    const sortedItems = [...items].sort((a, b) => {
+      const brandA = (a.brand || '-').toUpperCase();
+      const brandB = (b.brand || '-').toUpperCase();
+      const brandCompare = brandA.localeCompare(brandB);
+      if (brandCompare !== 0) return brandCompare;
+      return a.name.localeCompare(b.name);
+    });
+
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.width;
+    const pageHeight = doc.internal.pageSize.height;
+    const today = new Date().toLocaleDateString('en-IN', {
+      day: '2-digit', month: '2-digit', year: 'numeric'
+    });
+    const generatedAt = new Date().toLocaleString('en-IN', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: true
+    });
+
+    // Dark header background
+    doc.setFillColor(15, 23, 42);
+    doc.rect(0, 0, pageWidth, 35, 'F');
+
+    // Logo on left - FIX STRETCHING
+    const logoImg = '/LOGO.png';
+    try {
+      const imgProps = doc.getImageProperties(logoImg);
+      const targetHeight = 25;
+      const targetWidth = (imgProps.width * targetHeight) / imgProps.height;
+      doc.addImage(logoImg, 'PNG', 10, 5, targetWidth, targetHeight);
+    } catch (e) {
+      // Fallback if logo fails
+      doc.setFontSize(10);
+      doc.setTextColor(255, 255, 255);
+      doc.text('LOGO', 15, 20);
+    }
+
+    // STOCK SUMMARY title centered
+    doc.setFontSize(18);
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.text('STOCK SUMMARY', pageWidth / 2, 18, { align: 'center' });
+
+    // Date on right
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    doc.text(today, pageWidth - 14, 14, { align: 'right' });
+
+    // Accent line below header
+    doc.setDrawColor(99, 102, 241); // indigo
+    doc.setLineWidth(1.5);
+    doc.line(0, 35, pageWidth, 35);
+
+    // Stock Location
+    doc.setFontSize(10);
+    doc.setTextColor(0, 0, 0); // Black text
+    doc.setFont('helvetica', 'bold');
+    doc.text('Stock Location:', 14, 44);
     
-    const message = `*Stock Summary (${selectedSalesmanId ? allSalesmen.find(s => s.id === selectedSalesmanId)?.name : 'Main Store'}) - ${new Date().toLocaleDateString()}*\n\n${stockText}`;
-    window.open(generateWhatsAppLink('', message), '_blank');
+    // Location Value in INDIGO Color
+    doc.setTextColor(99, 102, 241);
+    doc.setFont('helvetica', 'bold');
+    const location = selectedSalesmanId ? allSalesmen.find(s => s.id === selectedSalesmanId)?.name : 'MAIN STORE';
+    doc.text(String(location).toUpperCase(), 50, 44);
+
+    // Thin divider line
+    doc.setDrawColor(200, 200, 200);
+    doc.setLineWidth(0.3);
+    doc.line(14, 47, pageWidth - 14, 47);
+
+    let sn = 1;
+    let lastBrand = '';
+    let brandSubtotal = 0;
+    const tableBody: any[] = [];
+
+    // Reset brand grouping logic for A-Z sort if needed, but keeping subtotal logic as it makes sense for grouping
+    sortedItems.forEach((item, index) => {
+      const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
+      const isLow = stock <= (item.lowStockThreshold || 5);
+      const currentBrand = item.brand || '-';
+
+      // Brand logic (A-Z sorted items will naturally group brands if users use standard naming)
+      if (index > 0 && currentBrand !== lastBrand) {
+        tableBody.push([
+          '',
+          '',
+          { content: `${lastBrand} Total:`, styles: { halign: 'right', fontStyle: 'bold', fontSize: 10, textColor: [0, 0, 0] } },
+          { content: `${brandSubtotal} units`, styles: { halign: 'center', fontStyle: 'bold', fillColor: [240, 240, 240], fontSize: 10, textColor: [0, 0, 0] } }
+        ]);
+        brandSubtotal = 0;
+      }
+
+      const brandDisplay = currentBrand;
+      const rowStyle = isLow ? { fillColor: [254, 242, 242] } : {};
+      
+      tableBody.push([
+        { content: String(sn++), styles: { ...rowStyle, textColor: [0, 0, 0] } },
+        { content: brandDisplay, styles: { ...rowStyle, fontStyle: brandDisplay ? 'bold' : 'normal', textColor: [0, 0, 0] } },
+        { content: item.name, styles: { ...rowStyle, textColor: [0, 0, 0] } },
+        { 
+          content: String(stock),
+          styles: { ...rowStyle, textColor: isLow ? [220, 38, 38] : [0, 0, 0], fontStyle: isLow ? 'bold' : 'normal' }
+        }
+      ]);
+
+      brandSubtotal += stock;
+      lastBrand = currentBrand;
+
+      if (index === sortedItems.length - 1) {
+        tableBody.push([
+          '',
+          '',
+          { content: `${currentBrand} Total:`, styles: { halign: 'right', fontStyle: 'bold', fontSize: 10, textColor: [0, 0, 0] } },
+          { content: `${brandSubtotal} units`, styles: { halign: 'center', fontStyle: 'bold', fillColor: [240, 240, 240], fontSize: 10, textColor: [0, 0, 0] } }
+        ]);
+      }
+    });
+
+    autoTable(doc, {
+      startY: 51,
+      head: [['SN', 'BRAND', 'ITEM NAME', 'QTY']],
+      body: tableBody,
+      columnStyles: {
+        0: { cellWidth: 12, halign: 'center' },
+        1: { cellWidth: 35 },
+        2: { cellWidth: 'auto' },
+        3: { cellWidth: 25, halign: 'center' },
+      },
+      headStyles: {
+        fillColor: [15, 23, 42],
+        textColor: 255,
+        fontStyle: 'bold',
+        fontSize: 9,
+      },
+      styles: {
+        fontSize: 9,
+        cellPadding: 3,
+        textColor: [0, 0, 0], // Set default text color to pure black
+      },
+      alternateRowStyles: {
+        fillColor: [249, 249, 249],
+      },
+      didDrawPage: (data) => {
+        const pageCount = doc.getNumberOfPages();
+        doc.setFontSize(8);
+        doc.setTextColor(0, 0, 0); // Black footer text
+        doc.text(
+          `Page ${data.pageNumber} of ${pageCount}`,
+          pageWidth / 2,
+          pageHeight - 8,
+          { align: 'center' }
+        );
+        doc.text('CloudStock Pro', 14, pageHeight - 8);
+      }
+    });
+
+    const finalY = (doc as any).lastAutoTable.finalY + 8;
+    const totalQty = sortedItems.reduce((sum, item) => {
+      const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
+      return sum + (stock || 0);
+    }, 0);
+    const lowStockCount = sortedItems.filter(i => {
+      const stock = (user?.role === 'admin' && !selectedSalesmanId) ? i.mainStock : (salesmanInventory[i.id] || 0);
+      return stock <= (i.lowStockThreshold || 5);
+    }).length;
+
+    const totalsHeight = 35;
+    const startY = finalY + totalsHeight > pageHeight - 20
+      ? (doc.addPage(), 20)
+      : finalY;
+
+    doc.setFillColor(245, 245, 245);
+    doc.roundedRect(14, startY, pageWidth - 28, 30, 2, 2, 'F');
+    
+    doc.setDrawColor(99, 102, 241);
+    doc.setLineWidth(1);
+    doc.line(14, startY, pageWidth - 14, startY);
+
+    const valX = pageWidth - 20;
+
+    doc.setFontSize(10);
+    doc.setTextColor(0, 0, 0); // Black text
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Total Items:`, 20, startY + 8);
+    doc.text(`Total Qty:`, 20, startY + 16);
+    doc.text(`Low Stock Items:`, 20, startY + 24);
+
+    doc.setTextColor(99, 102, 241);
+    doc.text(`${sortedItems.length}`, valX, startY + 8, { align: 'right' });
+    doc.text(`${totalQty} units`, valX, startY + 16, { align: 'right' });
+    
+    doc.setTextColor(220, 38, 38);
+    doc.text(`${lowStockCount}`, valX, startY + 24, { align: 'right' });
+
+    doc.setFontSize(8);
+    doc.setTextColor(0, 0, 0); // Black text
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Generated on: ${generatedAt}`, 14, startY + 36);
+
+    doc.save(`Stock-Summary-${today.replace(/\//g, '-')}.pdf`);
   };
 
   const filteredItems = items.filter(item => {
@@ -357,11 +553,11 @@ const Inventory: React.FC = () => {
         </div>
         <div className="flex items-center gap-2">
           <button 
-            onClick={sendStockOnWhatsApp}
-            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded text-xs font-bold hover:bg-green-700 transition-colors shadow-sm"
+            onClick={generateStockSummaryPDF}
+            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded text-xs font-bold hover:bg-indigo-700 transition-colors shadow-sm"
           >
             <Share2 className="w-4 h-4" />
-            WHATSAPP SUMMARY
+            STOCK SUMMARY
           </button>
           {user?.role === 'admin' && (
             <button 

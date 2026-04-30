@@ -223,7 +223,7 @@ const Purchases: React.FC = () => {
       setIsSaving(true);
       try {
         const blob = await generateInvoicePDF({
-          title: 'PURCHASE ORDER',
+          title: 'PURCHASE BILL',
           themeColor: '#2563eb', // Blue theme
           salesman_name: user?.name || 'Admin',
           date_issued: new Date().toLocaleDateString(),
@@ -317,7 +317,7 @@ const Purchases: React.FC = () => {
 
       if (status === 'finalized') {
         const blob = await generateInvoicePDF({
-          title: 'PURCHASE ORDER',
+          title: 'PURCHASE BILL',
           themeColor: '#2563eb',
           salesman_name: user?.name || 'Admin',
           date_issued: new Date(createdBill!.date.seconds * 1000).toLocaleDateString(),
@@ -356,7 +356,7 @@ const Purchases: React.FC = () => {
     const message = `*Purchase Order #${bill.billNumber}*\n\nSupplier: ${bill.entityName}\nDate: ${new Date(bill.date.seconds * 1000).toLocaleDateString()}\n\n*Total Cost: ${formatCurrency(bill.totalAmount)}*\nPending Balance: ${formatCurrency(bill.newBalance || 0)}`;
     
     const blob = await generateInvoicePDF({
-      title: 'PURCHASE ORDER',
+      title: 'PURCHASE BILL',
       themeColor: '#2563eb',
       salesman_name: user?.name || 'Admin',
       date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
