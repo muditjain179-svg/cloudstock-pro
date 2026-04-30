@@ -35,6 +35,14 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Link } from 'react-router-dom';
 import { cn, generateWhatsAppLink } from '../lib/utils';
 
+
+const normalizeText = (text: string): string => {
+  return text
+    .toLowerCase()
+    .replace(/[\s\-\/\[\]\(\)\.\_]+/g, '') // remove spaces and special chars
+    .trim();
+};
+
 const Inventory: React.FC = () => {
   const { user } = useAuth();
   const [items, setItems] = useState<Item[]>([]);
@@ -309,9 +317,23 @@ const Inventory: React.FC = () => {
     const matchesUserStock = !isSalesman || myStock > 0;
     const matchesSelectedStock = (user?.role === 'admin' && selectedSalesmanId) ? (salesmanInventory[item.id] > 0) : true;
 
-    const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         item.brand.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         item.category.toLowerCase().includes(searchTerm.toLowerCase());
+    const tokens = searchTerm.trim().toLowerCase().split(/\s+/).filter(t => t);
+
+    const matchesSearch = tokens.length === 0 || tokens.every(token => {
+      const normalizedToken = normalizeText(token);
+      const searchableFields = [
+        item.name || '',
+        item.brand || '',
+        item.category || '',
+      ];
+
+      return searchableFields.some(field => {
+        const normalizedField = normalizeText(field);
+        const originalField = field.toLowerCase();
+        return normalizedField.includes(normalizedToken) ||
+               originalField.includes(token.toLowerCase());
+      });
+    });
     const matchesBrand = !filterBrand || item.brand === filterBrand;
     const matchesCategory = !filterCategory || item.category === filterCategory;
     

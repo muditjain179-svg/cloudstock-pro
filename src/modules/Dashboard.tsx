@@ -11,7 +11,9 @@ import {
   ShoppingCart, 
   ArrowUpRight,
   ArrowDownRight,
-  Clock
+  Clock,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { formatCurrency, cn } from '../lib/utils';
@@ -26,7 +28,12 @@ const Dashboard: React.FC = () => {
   });
   const [recentBills, setRecentBills] = useState<Bill[]>([]);
   const [lowStockItems, setLowStockItems] = useState<Item[]>([]);
+  const [showAllLowStock, setShowAllLowStock] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  const visibleLowStockItems = showAllLowStock
+    ? lowStockItems
+    : lowStockItems.slice(0, 6);
 
   useEffect(() => {
     if (!user) return;
@@ -184,8 +191,14 @@ const Dashboard: React.FC = () => {
                 <h3 className="text-sm font-bold text-red-900">Immediate Attention Required</h3>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {lowStockItems.map(item => (
-                  <div key={item.id} className="bg-white p-3 rounded-lg border border-red-200 flex justify-between items-center">
+                {visibleLowStockItems.map(item => (
+                  <motion.div 
+                    layout
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    key={item.id} 
+                    className="bg-white p-3 rounded-lg border border-red-200 flex justify-between items-center"
+                  >
                     <div>
                       <p className="text-xs font-bold text-gray-900">{item.name}</p>
                       <p className="text-[10px] text-gray-500 uppercase">{item.brand}</p>
@@ -194,9 +207,21 @@ const Dashboard: React.FC = () => {
                       <p className="text-[10px] text-red-600 font-bold">{item.mainStock} LEFT</p>
                       <p className="text-[9px] text-gray-400">Limit: {item.lowStockThreshold}</p>
                     </div>
-                  </div>
+                  </motion.div>
                 ))}
               </div>
+
+              {lowStockItems.length > 6 && (
+                <div className="flex justify-center mt-6">
+                  <button 
+                    onClick={() => setShowAllLowStock(!showAllLowStock)}
+                    className="flex items-center gap-2 px-6 py-2 border border-red-200 rounded-full text-[10px] font-black text-red-700 hover:bg-white hover:shadow-md transition-all uppercase tracking-widest bg-red-50/50"
+                  >
+                    {showAllLowStock ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                    {showAllLowStock ? 'Show Less' : `View All ${lowStockItems.length} Items`}
+                  </button>
+                </div>
+              )}
               <Link to="/inventory" className="mt-4 inline-block text-xs font-bold text-red-700 hover:underline">
                 View All Inventory →
               </Link>

@@ -57,6 +57,18 @@ const Purchases: React.FC = () => {
   const [lastFinalizedBill, setLastFinalizedBill] = useState<Bill | null>(null);
   const [supplierSearch, setSupplierSearch] = useState('');
 
+  // Quick Add Item States
+  const [isQuickAddModalOpen, setIsQuickAddModalOpen] = useState(false);
+  const [quickAddForm, setQuickAddForm] = useState({ name: '', category: '', brand: '' });
+  const [quickAddErrors, setQuickAddErrors] = useState<{ name?: string, category?: string, brand?: string }>({});
+
+  const normalizeText = (text: string): string => {
+    return text
+      .toLowerCase()
+      .replace(/[\s\-\/\[\]\(\)\.\_]+/g, '') // remove spaces and special chars
+      .trim();
+  };
+
   // Bill Form State
   const [billData, setBillData] = useState<{
     supplier: Supplier | null;
@@ -139,6 +151,57 @@ const Purchases: React.FC = () => {
     }
   };
 
+  const handleQuickAddItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSaving) return;
+
+    const newErrors: any = {};
+    if (!quickAddForm.name.trim()) newErrors.name = 'Item name is required';
+    if (!quickAddForm.category) newErrors.category = 'Category is required';
+    if (!quickAddForm.brand) newErrors.brand = 'Brand is required';
+
+    // Duplicate check
+    const isDuplicate = items.some(item => 
+      item.name.toLowerCase().trim() === quickAddForm.name.toLowerCase().trim()
+    );
+    if (isDuplicate) newErrors.name = 'An item with this name already exists.';
+
+    setQuickAddErrors(newErrors);
+    if (Object.keys(newErrors).length > 0) return;
+
+    setIsSaving(true);
+    try {
+      const itemId = crypto.randomUUID();
+      const newItem: any = {
+        name: quickAddForm.name.trim(),
+        category: quickAddForm.category,
+        brand: quickAddForm.brand,
+        openingBalance: 0,
+        mainStock: 0,
+        purchasePrice: 0,
+        sellingPrice: 0,
+        unit: 'pcs',
+        lowStockThreshold: 5,
+        id: itemId
+      };
+
+      await setDoc(doc(db, 'items', itemId), newItem);
+      
+      // Auto select and add to bill
+      addItemToBill(newItem);
+      
+      setIsQuickAddModalOpen(false);
+      setQuickAddForm({ name: '', category: '', brand: '' });
+      setItemSearch('');
+      setShowItemSearch(false);
+      alert("Item added! Now enter quantity and price.");
+    } catch (error) {
+      alert("Error adding item");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const handleSaveBill = async (status: 'draft' | 'finalized') => {
     if (!billData.supplier) {
       alert("Please select a supplier");
@@ -190,26 +253,34 @@ const Purchases: React.FC = () => {
     try {
       let createdBill: Bill | null = null;
       await runTransaction(db, async (transaction) => {
-        // 1. Collect all reads first
-        const itemUpdates: Array<{ ref: any, currentStock: number, qty: number }> = [];
-
         if (status === 'finalized') {
+          const updates: Array<{ ref: any, currentStock: number, currentOpeningBalance: number, qty: number }> = [];
+          
+          // 1. All Reads
           for (const billItem of billData.items) {
             const itemRef = doc(db, 'items', billItem.itemId);
             const itemDoc = await transaction.get(itemRef);
             if (!itemDoc.exists()) throw new Error(`Item ${billItem.name} not found`);
-            itemUpdates.push({
+            
+            const currentData = itemDoc.data();
+            updates.push({
               ref: itemRef,
-              currentStock: itemDoc.data()?.mainStock || 0,
+              currentStock: currentData?.mainStock || 0,
+              currentOpeningBalance: currentData?.openingBalance || 0,
               qty: billItem.quantity
             });
           }
-        }
 
-        // 2. Perform all writes after all reads
-        if (status === 'finalized') {
-          for (const update of itemUpdates) {
-            transaction.update(update.ref, { mainStock: update.currentStock + update.qty });
+          // 2. All Writes
+          for (const up of updates) {
+            if (up.currentStock === 0 || up.currentOpeningBalance === 0) {
+              transaction.update(up.ref, { 
+                mainStock: up.currentStock + up.qty,
+                openingBalance: up.qty 
+              });
+            } else {
+              transaction.update(up.ref, { mainStock: up.currentStock + up.qty });
+            }
           }
         }
 
@@ -464,8 +535,21 @@ const Purchases: React.FC = () => {
                         >
                           {items
                             .filter(i => {
-                              const matchesSearch = i.name.toLowerCase().includes(itemSearch.toLowerCase()) || i.brand.toLowerCase().includes(itemSearch.toLowerCase());
-                              return matchesSearch;
+                              const searchLower = itemSearch.toLowerCase();
+                              const normalizedSearch = normalizeText(itemSearch);
+                              
+                              const searchableFields = [
+                                i.name || '',
+                                i.brand || '',
+                                i.category || '',
+                              ];
+
+                              return searchableFields.some(field => {
+                                const normalizedField = normalizeText(field);
+                                const originalField = field.toLowerCase();
+                                return normalizedField.includes(normalizedSearch) ||
+                                       originalField.includes(searchLower);
+                              });
                             })
                             .map(item => (
                               <button
@@ -487,9 +571,28 @@ const Purchases: React.FC = () => {
                                 </div>
                               </button>
                             ))}
-                          {items.filter(i => (i.name.toLowerCase().includes(itemSearch.toLowerCase()) || i.brand.toLowerCase().includes(itemSearch.toLowerCase()))).length === 0 && (
+                          {itemSearch && items.filter(i => {
+                            const searchLower = itemSearch.toLowerCase();
+                            const normalizedSearch = normalizeText(itemSearch);
+                            const searchableFields = [i.name || '', i.brand || '', i.category || ''];
+                            return searchableFields.some(field => {
+                              const normalizedField = normalizeText(field);
+                              const originalField = field.toLowerCase();
+                              return normalizedField.includes(normalizedSearch) || originalField.includes(searchLower);
+                            });
+                          }).length === 0 && (
                             <div className="p-8 text-center bg-slate-50/50">
-                              <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">No matching items found</p>
+                              <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mb-4">No item found for "{itemSearch}"</p>
+                              <button 
+                                onClick={() => {
+                                  setQuickAddForm({ ...quickAddForm, name: itemSearch });
+                                  setIsQuickAddModalOpen(true);
+                                }}
+                                className="px-6 py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all uppercase tracking-widest shadow-md active:scale-95 flex items-center gap-2 mx-auto"
+                              >
+                                <Plus className="w-4 h-4" />
+                                Add "{itemSearch}" as New Item
+                              </button>
                             </div>
                           )}
                         </motion.div>
@@ -511,7 +614,6 @@ const Purchases: React.FC = () => {
                         value={item.quantity}
                         min="1"
                         onChange={(e) => updateBillItem(idx, { quantity: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
-                        placeholder="e.g. 25"
                         className="w-full px-2 py-1 border rounded-md focus:ring-2 focus:ring-indigo-500 outline-none font-bold"
                       />
                     </div>
@@ -521,7 +623,6 @@ const Purchases: React.FC = () => {
                         type="number" 
                         value={item.price}
                         onChange={(e) => updateBillItem(idx, { price: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
-                        placeholder="e.g. 250"
                         className="w-full px-2 py-1 border rounded-md focus:ring-2 focus:ring-indigo-500 outline-none font-bold text-indigo-600"
                       />
                     </div>
@@ -555,7 +656,6 @@ const Purchases: React.FC = () => {
                       value={billData.oldDue}
                       onChange={(e) => setBillData({ ...billData, oldDue: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                       className="w-full pl-8 pr-4 py-2 bg-slate-50 border border-slate-100 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                      placeholder="e.g. 500"
                     />
                   </div>
                 </div>
@@ -574,7 +674,6 @@ const Purchases: React.FC = () => {
                       value={billData.receivedAmount}
                       onChange={(e) => setBillData({ ...billData, receivedAmount: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                       className="w-full pl-8 pr-4 py-2 bg-emerald-50/30 border border-emerald-100 rounded-lg text-sm font-bold text-emerald-700 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                      placeholder="e.g. 300"
                     />
                   </div>
                 </div>
@@ -626,7 +725,83 @@ const Purchases: React.FC = () => {
           </div>
         </div>
 
-        {/* New Supplier Modal */}
+        <AnimatePresence>
+          {isQuickAddModalOpen && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsQuickAddModalOpen(false)} className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" />
+              <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="bg-white w-full max-w-md rounded-2xl shadow-2xl relative z-10 overflow-hidden text-xs">
+                <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50 uppercase font-black tracking-widest text-slate-400">
+                  <h2 className="text-sm font-bold text-gray-900 tracking-tight">Quick Add New Item</h2>
+                  <button onClick={() => setIsQuickAddModalOpen(false)} className="p-2 hover:bg-gray-200 rounded-full transition-colors"><X className="w-5 h-5" /></button>
+                </div>
+                <form onSubmit={handleQuickAddItem} className="p-6 space-y-4 font-bold">
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">Item Name <span className="text-red-500">*</span></label>
+                    <input 
+                      required 
+                      type="text" 
+                      value={quickAddForm.name} 
+                      onChange={e => setQuickAddForm({ ...quickAddForm, name: e.target.value })} 
+                      placeholder="e.g. Samsung A50"
+                      className="w-full px-4 py-2 bg-slate-50 border border-slate-100 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" 
+                    />
+                    {quickAddErrors.name && <p className="text-rose-500 text-[10px] mt-1">{quickAddErrors.name}</p>}
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">Category <span className="text-red-500">*</span></label>
+                      <select 
+                        required
+                        value={quickAddForm.category}
+                        onChange={e => setQuickAddForm({ ...quickAddForm, category: e.target.value })}
+                        className="w-full px-4 py-2 bg-slate-50 border border-slate-100 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                      >
+                        <option value="">Select...</option>
+                        {Array.from(new Set(items.map(i => i.category))).map(cat => (
+                          <option key={cat} value={cat}>{cat}</option>
+                        ))}
+                      </select>
+                      {quickAddErrors.category && <p className="text-rose-500 text-[10px] mt-1">{quickAddErrors.category}</p>}
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">Brand <span className="text-red-500">*</span></label>
+                      <select 
+                        required
+                        value={quickAddForm.brand}
+                        onChange={e => setQuickAddForm({ ...quickAddForm, brand: e.target.value })}
+                        className="w-full px-4 py-2 bg-slate-50 border border-slate-100 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                      >
+                        <option value="">Select...</option>
+                        {Array.from(new Set(items.map(i => i.brand))).map(brand => (
+                          <option key={brand} value={brand}>{brand}</option>
+                        ))}
+                      </select>
+                      {quickAddErrors.brand && <p className="text-rose-500 text-[10px] mt-1">{quickAddErrors.brand}</p>}
+                    </div>
+                  </div>
+
+                  <div className="p-4 bg-indigo-50/50 rounded-xl border border-indigo-100 text-[10px] text-indigo-700 flex items-start gap-2 italic">
+                    <span className="font-black not-italic block mt-0.5">ℹ️</span>
+                    <p>The purchased quantity will automatically become the opening stock for this item.</p>
+                  </div>
+
+                  <div className="pt-4">
+                    <button 
+                      type="submit" 
+                      disabled={isSaving}
+                      className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-[0.98] uppercase tracking-widest text-xs flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                      {isSaving ? (
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      ) : 'CREATE ITEM & ADD TO BILL'}
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
         <AnimatePresence>
           {isSupplierModalOpen && (
             <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">

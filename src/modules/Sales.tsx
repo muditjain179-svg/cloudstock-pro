@@ -586,7 +586,6 @@ const Sales: React.FC = () => {
                         min="0"
                         max={user?.role === 'admin' ? items.find(i => i.id === item.itemId)?.mainStock : (salesmanInventory[item.itemId] || 0)}
                         onChange={(e) => updateBillItem(idx, { quantity: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
-                        placeholder="e.g. 25"
                         className="w-full px-2 py-1 border rounded-md focus:ring-2 focus:ring-indigo-500 outline-none"
                       />
                     </div>
@@ -596,7 +595,6 @@ const Sales: React.FC = () => {
                         type="number" 
                         value={item.price}
                         onChange={(e) => updateBillItem(idx, { price: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
-                        placeholder="e.g. 300"
                         className="w-full px-2 py-1 border rounded-md"
                       />
                     </div>
@@ -631,7 +629,6 @@ const Sales: React.FC = () => {
                       value={billData.oldDue}
                       onChange={(e) => setBillData({ ...billData, oldDue: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                       className="w-full pl-8 pr-4 py-2 bg-slate-50 border border-slate-100 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                      placeholder="e.g. 250"
                     />
                   </div>
                 </div>
@@ -650,7 +647,6 @@ const Sales: React.FC = () => {
                       value={billData.receivedAmount}
                       onChange={(e) => setBillData({ ...billData, receivedAmount: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                       className="w-full pl-8 pr-4 py-2 bg-emerald-50/30 border border-emerald-100 rounded-lg text-sm font-bold text-emerald-700 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                      placeholder="e.g. 300"
                     />
                   </div>
                 </div>
