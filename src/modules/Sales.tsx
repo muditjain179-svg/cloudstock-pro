@@ -15,7 +15,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
-import { Bill, Item, Customer, BillItem } from '../types';
+import { Bill, Item, Customer, BillItem, BillStatus } from '../types';
 import { 
   Plus, 
   Search, 
@@ -57,6 +57,7 @@ const Sales: React.FC = () => {
   const [customerSearch, setCustomerSearch] = useState('');
 
   // Bill Form State
+  // Bill Form State
   const [billData, setBillData] = useState<{
     customer: Customer | null;
     items: BillItem[];
@@ -71,6 +72,13 @@ const Sales: React.FC = () => {
     status: 'draft'
   });
 
+  const [activeBills, setActiveBills] = useState<Bill[]>([]);
+  const [draftBills, setDraftBills] = useState<Bill[]>([]);
+  const [currentTab, setCurrentTab] = useState<'active' | 'drafts'>('active');
+  const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
+  const [viewingDraft, setViewingDraft] = useState<Bill | null>(null);
+  const [isFinalizing, setIsFinalizing] = useState<Bill | null>(null);
+
   const filteredCustomers = customers.filter(c => 
     c.name.toLowerCase().includes(customerSearch.toLowerCase()) || 
     (c.phone && c.phone.includes(customerSearch))
@@ -79,15 +87,26 @@ const Sales: React.FC = () => {
   useEffect(() => {
     if (!user) return;
 
-    // Listen for bills - filtered by type and optionally by user
-    const billsQ = user.role === 'admin'
-      ? query(collection(db, 'bills'), where('type', '==', 'sale'), orderBy('date', 'desc'))
-      : query(collection(db, 'bills'), where('type', '==', 'sale'), where('createdBy', '==', user.id), orderBy('date', 'desc'));
+    // Listen for Finalized Bills
+    const activeBillsQ = user.role === 'admin'
+      ? query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'finalized'), orderBy('date', 'desc'))
+      : query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'finalized'), where('createdBy', '==', user.id), orderBy('date', 'desc'));
 
-    const unsubBills = onSnapshot(billsQ, (snapshot) => {
-      setBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
+    const unsubActive = onSnapshot(activeBillsQ, (snapshot) => {
+      setActiveBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
     }, (error) => {
-      console.error("Bills listener error:", error);
+      console.error("Active bills listener error:", error);
+    });
+
+    // Listen for Draft Bills
+    const draftsQ = user.role === 'admin'
+      ? query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'draft'), orderBy('date', 'desc'))
+      : query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'draft'), where('createdBy', '==', user.id), orderBy('date', 'desc'));
+
+    const unsubDrafts = onSnapshot(draftsQ, (snapshot) => {
+      setDraftBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
+    }, (error) => {
+      console.error("Draft bills listener error:", error);
     });
 
     const unsubItems = onSnapshot(collection(db, 'items'), (snapshot) => {
@@ -115,7 +134,7 @@ const Sales: React.FC = () => {
     }
 
     setLoading(false);
-    return () => { unsubBills(); unsubItems(); unsubCustomers(); unsubInventory(); };
+    return () => { unsubActive(); unsubDrafts(); unsubItems(); unsubCustomers(); unsubInventory(); };
   }, [user]);
 
   const calculateSubtotal = () => billData.items.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0);
@@ -154,6 +173,98 @@ const Sales: React.FC = () => {
     setBillData({ ...billData, items: newItems });
   };
 
+  const handleEditDraft = (draft: Bill) => {
+    const customer = customers.find(c => c.id === draft.entityId) || {
+      id: draft.entityId,
+      name: draft.entityName,
+      phone: draft.entityPhone || ''
+    };
+
+    setBillData({
+      customer,
+      items: draft.items,
+      oldDue: draft.oldDue,
+      receivedAmount: draft.receivedAmount,
+      status: 'draft'
+    });
+    setEditingDraftId(draft.id);
+    setIsCreating(true);
+  };
+
+  const handleFinalizeBill = async (billToFinalize: Bill) => {
+    if (!user || isSaving) return;
+    
+    setIsSaving(true);
+    try {
+      await runTransaction(db, async (transaction) => {
+        const stockUpdates: Array<{ ref: any, currentQty: number, decrement: number }> = [];
+
+        // Part 7: Salesman Inventory Check
+        for (const billItem of billToFinalize.items) {
+          if (user.role === 'salesman') {
+            const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
+            const invDoc = await transaction.get(invRef);
+            const currentQty = invDoc.exists() ? invDoc.data().quantity : 0;
+            if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentQty}`);
+            stockUpdates.push({ ref: invRef, currentQty, decrement: billItem.quantity });
+          } else {
+            const itemRef = doc(db, 'items', billItem.itemId);
+            const itemDoc = await transaction.get(itemRef);
+            const currentStock = itemDoc.data()?.mainStock || 0;
+            if (currentStock < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentStock}`);
+            stockUpdates.push({ ref: itemRef, currentQty: currentStock, decrement: billItem.quantity });
+          }
+        }
+
+        for (const update of stockUpdates) {
+          transaction.update(update.ref, { quantity: update.currentQty - update.decrement });
+        }
+
+        const billRef = doc(db, 'bills', billToFinalize.id);
+        transaction.update(billRef, { 
+          status: 'finalized',
+          date: Timestamp.now()
+        });
+      });
+
+      const finalBill = { ...billToFinalize, status: 'finalized' as BillStatus };
+      setLastFinalizedBill(finalBill);
+      
+      const blob = await generateInvoicePDF({
+        title: 'SALES BILL',
+        themeColor: '#dc2626',
+        salesman_name: user?.name || 'Staff',
+        date_issued: new Date().toLocaleDateString(),
+        invoice_no: billToFinalize.billNumber,
+        customer_name: billToFinalize.entityName,
+        items: billToFinalize.items.map(i => {
+          const itemInfo = items.find(item => item.id === i.itemId);
+          return {
+            item_name: i.name,
+            brand: itemInfo?.brand || '-',
+            rate: Number(i.price),
+            qty: Number(i.quantity),
+            unit: itemInfo?.unit || 'pcs',
+            subtotal: Number(i.price) * Number(i.quantity)
+          };
+        }),
+        total_amount: billToFinalize.subtotal,
+        old_due: Number(billToFinalize.oldDue || 0),
+        receipt_amount: Number(billToFinalize.receivedAmount || 0),
+        new_balance: Number(billToFinalize.newBalance || 0)
+      });
+
+      if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
+      setPdfPreviewUrl(URL.createObjectURL(blob));
+      setShowFinalizeOverlay(true);
+      setIsFinalizing(null);
+    } catch (error: any) {
+      alert(error.message || "Error finalizing bill");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const handleSaveBill = async (status: 'draft' | 'finalized') => {
     if (!billData.customer) {
       alert("Please select a customer");
@@ -182,7 +293,7 @@ const Sales: React.FC = () => {
           themeColor: '#dc2626',
           salesman_name: user?.name || 'Staff',
           date_issued: new Date().toLocaleDateString(),
-          invoice_no: 'DRAFT',
+          invoice_no: editingDraftId ? draftBills.find(d => d.id === editingDraftId)?.billNumber || 'DRAFT' : 'DRAFT',
           customer_name: billData.customer!.name,
           items: billData.items.map(i => {
             const itemInfo = items.find(item => item.id === i.itemId);
@@ -221,13 +332,13 @@ const Sales: React.FC = () => {
               const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
               const invDoc = await transaction.get(invRef);
               const currentQty = invDoc.exists() ? invDoc.data().quantity : 0;
-              if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}`);
+              if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentQty}`);
               stockUpdates.push({ ref: invRef, currentQty, decrement: billItem.quantity });
             } else {
               const itemRef = doc(db, 'items', billItem.itemId);
               const itemDoc = await transaction.get(itemRef);
               const currentStock = itemDoc.data()?.mainStock || 0;
-              if (currentStock < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}`);
+              if (currentStock < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentStock}`);
               stockUpdates.push({ ref: itemRef, currentQty: currentStock, decrement: billItem.quantity });
             }
           }
@@ -242,14 +353,14 @@ const Sales: React.FC = () => {
           }
         }
 
-        const newBillId = crypto.randomUUID();
-        const newBillRef = doc(db, 'bills', newBillId);
+        const billId = editingDraftId || crypto.randomUUID();
+        const billRef = doc(db, 'bills', billId);
         const subtotalValue = calculateSubtotal();
         const grandTotalValue = calculateGrandTotal();
         const newBalanceValue = calculateNewBalance();
 
-        const billPayload = {
-          billNumber: `S-${Date.now().toString().slice(-6)}`,
+        const billPayload: any = {
+          billNumber: editingDraftId ? draftBills.find(d => d.id === editingDraftId)?.billNumber : `S-${Date.now().toString().slice(-6)}`,
           type: 'sale',
           date: Timestamp.now(),
           entityId: billData.customer!.id,
@@ -268,8 +379,14 @@ const Sales: React.FC = () => {
           createdBy: user.id,
           status
         };
-        transaction.set(newBillRef, billPayload);
-        createdBill = { id: newBillRef.id, ...billPayload } as Bill;
+        
+        if (editingDraftId) {
+          transaction.update(billRef, billPayload);
+        } else {
+          transaction.set(billRef, billPayload);
+        }
+        
+        createdBill = { id: billRef.id, ...billPayload } as Bill;
       });
 
       if (status === 'finalized' && createdBill) {
@@ -301,9 +418,12 @@ const Sales: React.FC = () => {
 
         if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
         setPdfPreviewUrl(URL.createObjectURL(blob));
+        if (editingDraftId) alert("Draft finalized successfully!");
       } else {
         setIsCreating(false);
+        setEditingDraftId(null);
         setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
+        if (editingDraftId) alert("Draft saved successfully");
       }
     } catch (error: any) {
       alert(error.message || "Error saving bill");
@@ -439,13 +559,17 @@ const Sales: React.FC = () => {
         <div className="space-y-6">
         <div className="flex items-center gap-4">
           <button 
-            onClick={() => setIsCreating(false)} 
+            onClick={() => {
+              setIsCreating(false);
+              setEditingDraftId(null);
+              setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
+            }} 
             className="flex items-center gap-2 px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-slate-200 transition-all active:scale-95 shadow-sm"
           >
             <ChevronRight className="w-4 h-4 rotate-180" />
             BACK
           </button>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">New Sales Bill</h1>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{editingDraftId ? 'Edit Draft Bill' : 'New Sales Bill'}</h1>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -897,118 +1021,297 @@ const Sales: React.FC = () => {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Sales Records</h1>
-          <p className="text-xs text-gray-500 uppercase tracking-widest font-bold mt-1">Manage customer bills and transactions</p>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Sales Records</h1>
+          <p className="text-slate-500 text-sm">Manage and track your sales bills</p>
         </div>
-        <button 
-          onClick={() => setIsCreating(true)}
-          className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded text-xs font-bold hover:bg-blue-700 shadow-sm transition-all active:scale-[0.98]"
-        >
-          <Plus className="w-4 h-4" />
-          CREATE NEW SALE
-        </button>
+        
+        <div className="flex items-center gap-3">
+          <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200">
+            <button 
+              onClick={() => setCurrentTab('active')}
+              className={cn(
+                "px-4 py-2 rounded-lg text-xs font-bold transition-all uppercase tracking-widest",
+                currentTab === 'active' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
+              )}
+            >
+              Active Bills
+            </button>
+            <button 
+              onClick={() => setCurrentTab('drafts')}
+              className={cn(
+                "px-4 py-2 rounded-lg text-xs font-bold transition-all uppercase tracking-widest flex items-center gap-2",
+                currentTab === 'drafts' ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
+              )}
+            >
+              Drafts
+              {draftBills.length > 0 && (
+                <span className="bg-amber-100 text-amber-600 px-1.5 py-0.5 rounded-full text-[10px]">
+                  {draftBills.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          <button 
+            onClick={() => setIsCreating(true)}
+            className="flex items-center gap-2 px-6 py-3 bg-slate-900 text-white rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-slate-800 transition-all active:scale-95 shadow-lg shadow-slate-200"
+          >
+            <Plus className="w-4 h-4" />
+            CREATE NEW SALE
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4">
-        {bills.map(bill => (
-          <div key={bill.id} className="bg-white p-4 sm:p-5 rounded-xl border border-gray-100 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between group gap-4 transition-all hover:border-indigo-200">
-            <div className="flex items-center gap-3 sm:gap-4 w-full sm:w-auto">
-              <div className={cn(
-                "w-10 h-10 sm:w-12 sm:h-12 rounded-lg sm:rounded-xl flex items-center justify-center shadow-inner shrink-0",
-                bill.status === 'finalized' ? "bg-emerald-50 text-emerald-600" : "bg-indigo-50 text-indigo-600"
-              )}>
-                <FileText className="w-5 h-5 sm:w-6 sm:h-6" />
-              </div>
-              <div className="min-w-0 flex-1 sm:flex-initial">
-                <h3 className="font-bold text-slate-900 flex items-center gap-2 tracking-tight truncate">
-                  #{bill.billNumber}
-                  <span className={cn(
-                    "text-[8px] sm:text-[9px] uppercase px-2 py-0.5 rounded-full font-bold shrink-0",
-                    bill.status === 'finalized' ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
-                  )}>
-                    {bill.status}
-                  </span>
-                </h3>
-                <p className="text-[10px] sm:text-xs text-slate-500 uppercase font-black tracking-widest truncate leading-tight">{bill.entityName} • {new Date(bill.date.seconds * 1000).toLocaleDateString()}</p>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between sm:justify-end gap-3 sm:gap-6 w-full sm:w-auto pt-3 sm:pt-0 border-t sm:border-0 border-slate-50">
-              <div className="text-left sm:text-right">
-                <p className="text-[8px] sm:text-[10px] text-slate-400 font-bold uppercase mb-0.5 tracking-tighter shrink-0">Amount</p>
-                <p className="text-base sm:text-lg font-black text-slate-900 tracking-tighter whitespace-nowrap leading-none">{formatCurrency(bill.totalAmount)}</p>
-              </div>
-              <div className="flex gap-2">
-                <button 
-                  onClick={(e) => { e.stopPropagation(); shareBillOnWhatsApp(bill); }}
-                  className="flex items-center gap-1.5 px-2 sm:px-3 py-2 bg-emerald-50 text-emerald-600 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-tight hover:bg-emerald-100 transition-all border border-emerald-100 shrink-0"
-                  title="Share on WhatsApp"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span className="hidden xs:inline">SEND PDF</span>
-                  <span className="xs:hidden">SEND</span>
-                </button>
-                <button 
-                  onClick={async (e) => { 
-                    e.stopPropagation();
-                    const blob = await generateInvoicePDF({
-                      title: 'CLOUDSTOCK PRO',
-                      themeColor: '#d32f2f',
-                      salesman_name: user?.name || 'Staff',
-                      date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
-                      invoice_no: bill.billNumber,
-                      customer_name: bill.entityName,
-                      items: bill.items.map(i => {
-                        const itemInfo = items.find(item => item.id === i.itemId);
-                        return {
-                          item_name: i.name,
-                          brand: itemInfo?.brand || '-',
-                          rate: i.price,
-                          qty: i.quantity,
-                          unit: itemInfo?.unit || 'pcs',
-                          subtotal: i.price * i.quantity
-                        };
-                      }),
-                      total_amount: bill.subtotal || 0,
-                      old_due: bill.oldDue || 0,
-                      receipt_amount: bill.receivedAmount || 0,
-                      new_balance: bill.newBalance || 0
-                    });
-                    const link = document.createElement('a');
-                    link.href = URL.createObjectURL(blob);
-                    link.download = `Invoice_${bill.billNumber}.pdf`;
-                    link.click();
-                  }}
-                  className="flex items-center gap-1.5 px-2 sm:px-3 py-2 bg-blue-50 text-blue-600 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-tight hover:bg-blue-100 transition-all border border-blue-100 shrink-0"
-                  title="Download Invoice"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span className="hidden xs:inline">DOWNLOAD</span>
-                </button>
-                {user?.role === 'admin' && (
-                   <button 
-                    onClick={(e) => { e.stopPropagation(); handleDeleteBill(bill); }}
-                    className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors border border-transparent hover:border-red-100"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                )}
-                <div className="p-2">
-                   <ChevronRight className="w-5 h-5 text-gray-300 group-hover:text-blue-500 transition-colors" />
+      {currentTab === 'active' ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {activeBills.map((bill) => (
+            <motion.div 
+              layout
+              key={bill.id} 
+              className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-all group"
+            >
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="px-2 py-0.5 bg-slate-900 text-white text-[10px] font-black rounded uppercase tracking-tighter">
+                      {bill.billNumber}
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                      {new Date(bill.date.seconds * 1000).toLocaleDateString()}
+                    </span>
+                  </div>
+                  <h3 className="font-bold text-slate-900 group-hover:text-indigo-600 transition-colors uppercase tracking-tight truncate max-w-[180px]">
+                    {bill.entityName}
+                  </h3>
+                </div>
+                <div className="text-right">
+                  <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-0.5">Grand Total</p>
+                  <p className="text-lg font-black text-slate-900 tracking-tighter">
+                    {formatCurrency(bill.totalAmount)}
+                  </p>
                 </div>
               </div>
+
+              <div className="flex items-center gap-2 pt-4 border-t border-slate-50">
+                <button 
+                  onClick={() => shareBillOnWhatsApp(bill)}
+                  className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-indigo-50 text-indigo-600 rounded-xl font-bold text-[10px] uppercase tracking-widest hover:bg-indigo-100 transition-colors"
+                >
+                  <Printer className="w-4 h-4" />
+                  Print / Share
+                </button>
+                <button 
+                  onClick={() => handleDeleteBill(bill)}
+                  className="p-2.5 text-slate-300 hover:text-rose-500 transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </motion.div>
+          ))}
+          {activeBills.length === 0 && (
+            <div className="col-span-full py-12 text-center">
+              <p className="text-slate-400 font-bold uppercase tracking-widest text-xs">No finalized bills found</p>
             </div>
-          </div>
-        ))}
-        {bills.length === 0 && (
-          <div className="text-center py-20 bg-gray-50 border border-dashed border-gray-200 rounded-xl">
-            <ShoppingCart className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-            <p className="text-xs text-gray-400 font-bold uppercase tracking-widest">No sales records found</p>
+          )}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {draftBills.map((bill) => (
+            <motion.div 
+              layout
+              key={bill.id} 
+              className="bg-white p-5 rounded-2xl border border-amber-100 shadow-sm hover:shadow-md transition-all border-l-4 border-l-amber-400"
+            >
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-[10px] font-black rounded uppercase tracking-tighter">
+                      DRAFT • {bill.billNumber}
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                      {new Date(bill.date.seconds * 1000).toLocaleDateString()}
+                    </span>
+                  </div>
+                  <h3 className="font-bold text-slate-900 uppercase tracking-tight truncate max-w-[180px]">
+                    {bill.entityName}
+                  </h3>
+                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">
+                    {bill.items.length} Items in bill
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-0.5">Est. Total</p>
+                  <p className="text-lg font-black text-slate-900 tracking-tighter">
+                    {formatCurrency(bill.totalAmount)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 pt-4 border-t border-slate-50">
+                <button 
+                  onClick={() => setViewingDraft(bill)}
+                  className="px-3 py-2 bg-slate-50 text-slate-600 rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-slate-100"
+                >
+                  View
+                </button>
+                <button 
+                  onClick={() => handleEditDraft(bill)}
+                  className="px-3 py-2 bg-indigo-50 text-indigo-600 rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-indigo-100"
+                >
+                  Edit
+                </button>
+                <button 
+                  onClick={() => setIsFinalizing(bill)}
+                  className="flex-1 py-2 bg-emerald-600 text-white rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-emerald-700 shadow-sm"
+                >
+                  Finalize
+                </button>
+                <button 
+                  onClick={() => handleDeleteBill(bill)}
+                  className="p-2 text-slate-300 hover:text-rose-500 transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </motion.div>
+          ))}
+          {draftBills.length === 0 && (
+            <div className="col-span-full py-12 text-center">
+              <p className="text-slate-400 font-bold uppercase tracking-widest text-xs">No draft bills found</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* View Draft Modal */}
+      <AnimatePresence>
+        {viewingDraft && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setViewingDraft(null)} className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" />
+            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl relative z-10 overflow-hidden flex flex-col max-h-[90vh]">
+              <div className="bg-amber-50 p-3 text-center border-b border-amber-100">
+                <p className="text-[10px] font-black text-amber-700 uppercase tracking-[0.2em]">This is a Draft Bill — not yet finalized</p>
+              </div>
+              <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                <div>
+                  <h2 className="text-lg font-bold text-gray-900 tracking-tight">Draft Details</h2>
+                  <p className="text-xs text-slate-400">Bill No: {viewingDraft.billNumber}</p>
+                </div>
+                <button onClick={() => setViewingDraft(null)} className="p-2 hover:bg-gray-200 rounded-full transition-colors"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="p-6 overflow-y-auto space-y-6">
+                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl">
+                  <div>
+                    <p className="text-[10px] uppercase font-bold text-slate-400">Customer</p>
+                    <p className="font-bold">{viewingDraft.entityName}</p>
+                    <p className="text-xs text-slate-500">{viewingDraft.entityPhone}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase font-bold text-slate-400">Draft Date</p>
+                    <p className="font-bold">{new Date(viewingDraft.date.seconds * 1000).toLocaleDateString()}</p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase font-black text-slate-400 tracking-widest">Bill Items</p>
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-100 text-slate-600">
+                      <tr>
+                        <th className="text-left p-2 rounded-l-lg">Item</th>
+                        <th className="text-center p-2">Qty</th>
+                        <th className="text-right p-2">Price</th>
+                        <th className="text-right p-2 rounded-r-lg">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {viewingDraft.items.map((item, idx) => (
+                        <tr key={idx} className="border-b border-slate-50">
+                          <td className="p-2 font-medium">{item.name}</td>
+                          <td className="p-2 text-center">{item.quantity}</td>
+                          <td className="p-2 text-right">{formatCurrency(item.price)}</td>
+                          <td className="p-2 text-right font-bold">{formatCurrency(item.quantity * item.price)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="space-y-2 pt-2">
+                  <div className="flex justify-between text-slate-500">
+                    <span>Subtotal</span>
+                    <span>{formatCurrency(viewingDraft.subtotal)}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-500">
+                    <span>Old Due</span>
+                    <span>{formatCurrency(viewingDraft.oldDue)}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-3 border-t border-b border-slate-100">
+                    <span className="font-bold text-slate-900">Grand Total</span>
+                    <span className="text-xl font-black text-slate-900">{formatCurrency(viewingDraft.totalAmount)}</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-600 font-bold">
+                    <span>Receipts</span>
+                    <span>-{formatCurrency(viewingDraft.receivedAmount || 0)}</span>
+                  </div>
+                  <div className="flex justify-between items-center bg-slate-900 text-white p-4 rounded-xl mt-4">
+                    <span className="text-xs uppercase font-bold tracking-widest text-slate-400">New Balance</span>
+                    <span className="text-xl font-black">{formatCurrency(viewingDraft.newBalance)}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="p-6 bg-slate-50 flex gap-3">
+                <button 
+                  onClick={() => { setViewingDraft(null); handleEditDraft(viewingDraft); }}
+                  className="flex-1 py-3 bg-white border border-slate-200 text-slate-700 font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-slate-100"
+                >
+                   Edit Draft
+                </button>
+                <button 
+                  onClick={() => { setViewingDraft(null); setIsFinalizing(viewingDraft); }}
+                  className="flex-1 py-3 bg-emerald-600 text-white font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-emerald-700"
+                >
+                   Finalize Bill
+                </button>
+              </div>
+            </motion.div>
           </div>
         )}
-      </div>
+      </AnimatePresence>
+
+      {/* Finalize Confirmation Modal */}
+      <AnimatePresence>
+        {isFinalizing && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsFinalizing(null)} className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" />
+            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="bg-white w-full max-w-sm rounded-2xl shadow-2xl relative z-10 p-6 text-center">
+              <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                <CheckCircle2 className="w-8 h-8" />
+              </div>
+              <h2 className="text-xl font-black text-slate-900 mb-2 tracking-tight">Finalize this bill?</h2>
+              <div className="bg-slate-50 rounded-xl p-4 mb-6 space-y-1 text-sm text-slate-700 font-bold">
+                <div className="flex justify-between"><span>Bill No:</span> <span>{isFinalizing.billNumber}</span></div>
+                <div className="flex justify-between"><span>Customer:</span> <span>{isFinalizing.entityName}</span></div>
+                <div className="flex justify-between"><span>Total:</span> <span className="text-indigo-600">{formatCurrency(isFinalizing.totalAmount)}</span></div>
+                <div className="flex justify-between"><span>Items:</span> <span>{isFinalizing.items.length}</span></div>
+              </div>
+              <p className="text-xs text-slate-400 mb-6 px-4 font-bold">Once finalized this bill cannot be edited and stock will be deducted.</p>
+              <div className="flex gap-3">
+                <button onClick={() => setIsFinalizing(null)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200">Cancel</button>
+                <button 
+                  onClick={() => handleFinalizeBill(isFinalizing)}
+                  disabled={isSaving}
+                  className="flex-1 py-3 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 shadow-lg shadow-emerald-100 disabled:opacity-50"
+                >
+                  {isSaving ? "Processing..." : "Finalize Bill"}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

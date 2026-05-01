@@ -1,39 +1,60 @@
-const CACHE_NAME = 'cloudstock-v1';
+/**
+ * CLOUDSTOCK PWA SERVICE WORKER
+ * This file is automatically versioned by Vite on every build.
+ */
+
+const CACHE_VERSION = '1714553200000'; // AUTO-REPLACED BY VITE
+const CACHE_NAME = `cloudstock-${CACHE_VERSION}`;
+
+// Assets that should be cached first for speed
 const STATIC_ASSETS = [
-  '/',
-  '/index.html',
   '/manifest.json',
-  '/LOGO.png',
-  '/assets/index.js',
-  '/assets/index.css'
+  '/LOGO.png'
 ];
 
-// Install Event - Cache App Shell
+// Helper to check if a request is for an asset (JS, CSS, Images, Fonts)
+const isAsset = (url) => {
+  return url.pathname.includes('/assets/') || 
+         url.pathname.endsWith('.png') || 
+         url.pathname.endsWith('.jpg') || 
+         url.pathname.endsWith('.jpeg') || 
+         url.pathname.endsWith('.svg') || 
+         url.pathname.endsWith('.webp') || 
+         url.pathname.endsWith('.woff') || 
+         url.pathname.endsWith('.woff2');
+};
+
+// Helper to check if a request should NEVER be cached (Firebase, Google APIs)
+const isExternalApi = (url) => {
+  return url.hostname.includes('firebase') || 
+         url.hostname.includes('googleapis') || 
+         url.hostname.includes('google.com');
+};
+
+// Install Event
 self.addEventListener('install', (event) => {
+  self.skipWaiting(); // Do not wait for old worker to close
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      console.log('[Service Worker] Pre-caching app shell');
       return cache.addAll(STATIC_ASSETS);
     })
   );
-  self.skipWaiting();
 });
 
-// Activate Event - Clean up old caches
+// Activate Event
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
         keys.map((key) => {
           if (key !== CACHE_NAME) {
-            console.log('[Service Worker] Removing old cache', key);
             return caches.delete(key);
           }
         })
       );
     })
   );
-  self.clients.claim();
+  self.clients.claim(); // Take control of all tabs immediately
 });
 
 // Fetch Event
@@ -42,51 +63,62 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(event.request.url);
 
-  // Firestore and Firebase Auth handled by their own SDK persistence
-  if (url.hostname.includes('firebase') || url.hostname.includes('googleapis')) {
+  // 1. Never cache Firebase/Google APIs
+  if (isExternalApi(url)) {
+    return; // Let browser handle it (no caching)
+  }
+
+  // 2. index.html / Navigation: Network-Only (with offline fallback)
+  if (event.request.mode === 'navigate' || url.pathname === '/' || url.pathname.endsWith('.html')) {
+    event.respondWith(
+      fetch(event.request).catch(() => {
+        return caches.match('/'); // Return root from cache ONLY if offline
+      })
+    );
     return;
   }
 
-  // Network-first strategy for dynamic content / API calls
-  // Cache-first for static assets
-  const isStaticAsset = STATIC_ASSETS.includes(url.pathname) || 
-                        url.pathname.includes('/assets/') || 
-                        url.pathname.endsWith('.png') || 
-                        url.pathname.endsWith('.jpg') || 
-                        url.pathname.endsWith('.svg');
-
-  if (isStaticAsset) {
+  // 3. Assets (JS, CSS, Images): Cache-First Strategy
+  if (isAsset(url)) {
     event.respondWith(
       caches.match(event.request).then((cachedResponse) => {
-        return cachedResponse || fetch(event.request).then((networkResponse) => {
-          return caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, networkResponse.clone());
-            return networkResponse;
+        if (cachedResponse) return cachedResponse;
+        
+        return fetch(event.request).then((networkResponse) => {
+          if (!networkResponse || networkResponse.status !== 200) return networkResponse;
+          
+          const responseToCache = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseToCache);
           });
+          return networkResponse;
         });
       })
     );
-  } else {
-    // Network-first for everything else (including navigation)
-    event.respondWith(
-      fetch(event.request)
-        .then((networkResponse) => {
-          if (networkResponse.status === 200) {
-            return caches.open(CACHE_NAME).then((cache) => {
-              cache.put(event.request, networkResponse.clone());
-              return networkResponse;
-            });
-          }
-          return networkResponse;
-        })
-        .catch(() => {
-          return caches.match(event.request).then((cachedResponse) => {
-            if (cachedResponse) return cachedResponse;
-            if (event.request.mode === 'navigate') {
-              return caches.match('/');
-            }
+    return;
+  }
+
+  // 4. Everything else: Network-First Strategy
+  event.respondWith(
+    fetch(event.request)
+      .then((networkResponse) => {
+        if (networkResponse && networkResponse.status === 200) {
+          const responseToCache = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseToCache);
           });
-        })
-    );
+        }
+        return networkResponse;
+      })
+      .catch(() => {
+        return caches.match(event.request);
+      })
+  );
+});
+
+// Listen for SKIP_WAITING message
+self.addEventListener('message', (event) => {
+  if (event.data === 'SKIP_WAITING') {
+    self.skipWaiting();
   }
 });
