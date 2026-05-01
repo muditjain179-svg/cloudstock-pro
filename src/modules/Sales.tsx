@@ -13,7 +13,7 @@ import {
   deleteDoc,
   where
 } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { Bill, Item, Customer, BillItem, BillStatus } from '../types';
 import { 
@@ -549,7 +549,7 @@ const Sales: React.FC = () => {
         transaction.delete(billRef);
       });
     } catch (error: any) {
-      alert("Error deleting bill: " + error.message);
+      handleFirestoreError(error, 'delete', `bills/${bill.id}`);
     }
   };
 

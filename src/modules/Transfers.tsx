@@ -11,7 +11,7 @@ import {
   getDocs,
   where
 } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { Bill, Item, UserProfile, BillItem } from '../types';
 import { 
@@ -327,7 +327,7 @@ const Transfers: React.FC = () => {
         transaction.delete(billRef);
       });
     } catch (error: any) {
-      alert("Error deleting transfer: " + error.message);
+      handleFirestoreError(error, 'delete', `bills/${bill.id}`);
     }
   };
 

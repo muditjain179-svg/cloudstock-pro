@@ -1,9 +1,22 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Helper functions
+
+    // --- GLOBAL HELPERS ---
     function isSignedIn() {
       return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && getUserData().role == 'admin';
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
     }
 
     function isValidId(id) {
@@ -31,33 +44,32 @@ service cloud.firestore {
     // Users
     match /users/{userId} {
       allow read: if isSignedIn();
-      allow write: if isSignedIn() && (request.auth.uid == userId);
+      // Only admins can create/update other users, but users can create their own profile during signup
+      allow write: if isSignedIn() && (isOwner(userId) || isAdmin());
     }
 
-    // Brands & Categories
+    // Catalog Data (Brands, Categories, Items)
     match /brands/{brandId} {
       allow read: if isSignedIn();
-      allow write: if isSignedIn(); // In this simple internal app, usually any user can add brands/categories
+      allow write: if isAdmin();
     }
     match /categories/{categoryId} {
       allow read: if isSignedIn();
-      allow write: if isSignedIn();
+      allow write: if isAdmin();
     }
-
-    // Items
     match /items/{itemId} {
       allow read: if isSignedIn();
-      allow write: if isSignedIn(); 
+      allow write: if isSignedIn(); // Allow writing stock updates during sales/purchases
     }
 
-    // Inventories
+    // Inventories (Salesman Stock)
     match /inventories/{salesmanId} {
       allow read: if isSignedIn();
-      allow write: if isSignedIn();
+      allow write: if isSignedIn() && (isOwner(salesmanId) || isAdmin());
       
       match /items/{itemId} {
         allow read: if isSignedIn();
-        allow write: if isSignedIn();
+        allow write: if isSignedIn() && (isOwner(salesmanId) || isAdmin());
       }
     }
 
@@ -71,11 +83,14 @@ service cloud.firestore {
       allow write: if isSignedIn();
     }
 
-    // Bills
+    // Bills (Sales, Purchases, Transfers)
     match /bills/{billId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn();
-      allow update: if isSignedIn(); // For status changes
+      allow update: if isSignedIn();
+      // Allow deletion if the user is an admin
+      // In this app, admins manage the overall inventory and can rollback bills
+      allow delete: if isAdmin();
     }
   }
 }
