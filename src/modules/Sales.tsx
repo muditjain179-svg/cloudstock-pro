@@ -31,7 +31,8 @@ import {
   Package as PackageIcon,
   ShoppingCart,
   UserPlus,
-  Download
+  Download,
+  ExternalLink
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { formatCurrency, generateInvoicePDF, generateWhatsAppLink, cn } from '../lib/utils';
@@ -189,6 +190,41 @@ const Sales: React.FC = () => {
     });
     setEditingDraftId(draft.id);
     setIsCreating(true);
+  };
+
+  const handleDownloadBill = async (bill: Bill) => {
+    try {
+      const blob = await generateInvoicePDF({
+        title: 'CLOUDSTOCK PRO',
+        themeColor: '#d32f2f',
+        salesman_name: user?.name || 'Staff',
+        date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
+        invoice_no: bill.billNumber,
+        customer_name: bill.entityName,
+        items: bill.items.map(i => {
+          const itemInfo = items.find(item => item.id === i.itemId);
+          return {
+            item_name: i.name,
+            brand: itemInfo?.brand || '-',
+            rate: i.price,
+            qty: i.quantity,
+            unit: itemInfo?.unit || 'pcs',
+            subtotal: i.price * i.quantity
+          };
+        }),
+        total_amount: bill.subtotal || 0,
+        old_due: bill.oldDue || 0,
+        receipt_amount: bill.receivedAmount || 0,
+        new_balance: bill.newBalance || 0
+      });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `Invoice_${bill.billNumber}.pdf`;
+      link.click();
+    } catch (error) {
+      console.error("Error downloading PDF:", error);
+      alert("Failed to generate PDF for download.");
+    }
   };
 
   const handleFinalizeBill = async (billToFinalize: Bill) => {
@@ -898,54 +934,93 @@ const Sales: React.FC = () => {
         {/* Finalize Confirmation & PDF Preview Overlay */}
         <AnimatePresence>
           {showFinalizeOverlay && (
-            <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/80 backdrop-blur-md" />
+            <div className="fixed inset-0 z-[200] flex items-end sm:items-center justify-center p-0 sm:p-4">
               <motion.div 
-                initial={{ y: 50, opacity: 0 }} 
-                animate={{ y: 0, opacity: 1 }} 
-                exit={{ y: 50, opacity: 0 }} 
-                className="bg-white w-full max-w-4xl max-h-[95vh] sm:max-h-[90vh] rounded-3xl shadow-2xl relative z-10 overflow-hidden flex flex-col"
+                initial={{ opacity: 0 }} 
+                animate={{ opacity: 1 }} 
+                exit={{ opacity: 0 }} 
+                onClick={() => { if (!lastFinalizedBill) { setShowFinalizeOverlay(false); setPdfPreviewUrl(null); } }}
+                className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" 
+              />
+              <motion.div 
+                initial={{ y: "100%" }} 
+                animate={{ y: 0 }} 
+                exit={{ y: "100%" }} 
+                transition={{ type: "spring", damping: 25, stiffness: 200 }}
+                className="bg-white w-full sm:max-w-4xl h-[92vh] sm:h-auto sm:max-h-[90vh] rounded-t-3xl sm:rounded-3xl shadow-2xl relative z-10 overflow-hidden flex flex-col"
               >
+                {/* Drag Handle for Mobile */}
+                <div className="w-12 h-1.5 bg-slate-200 rounded-full mx-auto my-3 sm:hidden shrink-0" />
+
                 {!lastFinalizedBill ? (
                   <>
-                    <div className="p-4 sm:p-6 border-b flex justify-between items-center">
+                    <div className="flex items-center justify-between p-4 sm:p-6 border-b sticky top-0 bg-white z-20">
                       <div>
-                        <h2 className="text-xl font-black text-slate-900 tracking-tight">Review & Finalize Bill</h2>
-                        <p className="text-xs text-slate-500 font-bold uppercase tracking-widest leading-tight">Please review the details below before completing the sale</p>
+                        <h2 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight leading-tight">Review & Finalize</h2>
+                        <p className="text-[10px] sm:text-xs text-slate-500 font-bold uppercase tracking-widest leading-tight">Confirm details below</p>
                       </div>
-                      <button 
-                        onClick={() => { setShowFinalizeOverlay(false); setPdfPreviewUrl(null); }}
-                        className="p-2 hover:bg-slate-100 rounded-full transition-colors"
-                      >
-                        <X className="w-6 h-6 text-slate-400" />
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {pdfPreviewUrl && (
+                          <>
+                            <button 
+                               onClick={() => {
+                                 const link = document.createElement('a');
+                                 link.href = pdfPreviewUrl;
+                                 link.download = `Preview.pdf`;
+                                 link.click();
+                               }}
+                               className="p-2.5 bg-slate-50 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-colors"
+                               title="Download PDF"
+                            >
+                               <Download className="w-5 h-5" />
+                            </button>
+                            <button 
+                              onClick={() => window.open(pdfPreviewUrl, '_blank')}
+                              className="p-2.5 bg-slate-50 text-slate-600 rounded-xl hover:bg-slate-100 transition-colors hidden sm:block"
+                              title="Open in New Tab"
+                            >
+                              <ExternalLink className="w-5 h-5" />
+                            </button>
+                          </>
+                        )}
+                        <button 
+                          onClick={() => { setShowFinalizeOverlay(false); setPdfPreviewUrl(null); }}
+                          className="p-2.5 hover:bg-slate-100 rounded-xl transition-colors"
+                          title="Close"
+                        >
+                          <X className="w-6 h-6 text-slate-400" />
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex-1 overflow-hidden p-4 sm:p-6 bg-slate-100 flex flex-col gap-4">
-                      <div className="bg-white rounded-2xl shadow-inner border border-slate-200 overflow-hidden flex-1 relative">
+                    <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-50">
+                      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden min-h-[600px] sm:min-h-[700px] relative w-full">
                         {pdfPreviewUrl ? (
-                          <iframe 
-                            src={pdfPreviewUrl} 
-                            className="w-full h-full border-none"
-                            title="Bill Preview"
-                          />
+                          <div className="w-full h-full overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+                            <iframe 
+                              src={`${pdfPreviewUrl}#view=FitH`} 
+                              className="w-full h-full min-h-[800px] border-none"
+                              title="Bill Preview"
+                            />
+                          </div>
                         ) : (
-                          <div className="absolute inset-0 flex items-center justify-center">
-                            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600" />
+                          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+                            <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600" />
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Generating PDF Preview...</p>
                           </div>
                         )}
                       </div>
                     </div>
-                    <div className="p-4 sm:p-6 border-t bg-white flex flex-col sm:flex-row gap-3">
+                    <div className="p-4 sm:p-6 border-t bg-white flex flex-col sm:flex-row gap-3 sticky bottom-0 z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
                       <button 
                          onClick={() => { setShowFinalizeOverlay(false); setPdfPreviewUrl(null); }}
-                         className="flex-1 py-3 sm:py-4 border-2 border-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-50 transition-colors uppercase tracking-widest text-[10px] sm:text-xs order-2 sm:order-1"
+                         className="flex-1 py-3.5 sm:py-4 border-2 border-slate-100 text-slate-600 font-black rounded-2xl hover:bg-slate-50 transition-colors uppercase tracking-widest text-[10px] sm:text-xs order-2 sm:order-1"
                       >
                         Back to Edit
                       </button>
                       <button 
                         onClick={() => handleSaveBill('finalized')}
                         disabled={isSaving}
-                        className="flex-1 py-3 sm:py-4 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-700 shadow-xl shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs disabled:opacity-50 order-1 sm:order-2"
+                        className="flex-1 py-3.5 sm:py-4 bg-indigo-600 text-white font-black rounded-2xl hover:bg-indigo-700 shadow-xl shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs disabled:opacity-50 order-1 sm:order-2"
                       >
                         {isSaving ? (
                           <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -959,42 +1034,77 @@ const Sales: React.FC = () => {
                     </div>
                   </>
                 ) : (
-                  <div className="flex-1 overflow-y-auto p-6 sm:p-12 text-center space-y-6 sm:space-y-8">
-                    <div className="w-16 h-16 sm:w-24 sm:h-24 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-2 sm:mb-6">
-                      <CheckCircle2 className="w-8 h-8 sm:w-12 sm:h-12" />
-                    </div>
-                    <div>
-                      <h2 className="text-xl sm:text-3xl font-black text-slate-900 tracking-tight mb-2">Sale Finalized Successfully!</h2>
-                      <p className="text-slate-500 font-bold uppercase tracking-widest text-[10px] sm:text-xs">Bill #{lastFinalizedBill.billNumber} has been recorded</p>
-                    </div>
-
-                    <div className="bg-slate-50 border border-slate-200 rounded-2xl sm:rounded-3xl p-4 sm:p-6 h-[40vh] sm:h-[40vh] overflow-hidden">
-                       <iframe 
-                            src={pdfPreviewUrl!} 
-                            className="w-full h-full min-h-[300px] border-none rounded-xl"
-                            title="Finalized Bill"
-                          />
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
-                       <button 
-                        onClick={() => shareBillOnWhatsApp(lastFinalizedBill)}
-                        className="py-3 sm:py-4 bg-emerald-600 text-white font-bold rounded-2xl hover:bg-emerald-700 shadow-xl shadow-emerald-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs"
-                      >
-                        <Send className="w-4 h-4 sm:w-5 h-5" />
-                        Send PDF
-                      </button>
+                  <>
+                    <div className="flex items-center justify-between p-4 sm:p-6 border-b sticky top-0 bg-white z-20">
+                      <div className="flex items-center gap-3 text-emerald-600">
+                        <CheckCircle2 className="w-6 h-6" />
+                        <div>
+                          <h2 className="text-lg font-black text-slate-900 tracking-tight leading-tight">Sale Finalized</h2>
+                          <p className="text-[10px] font-bold uppercase tracking-widest leading-none">Bill #{lastFinalizedBill.billNumber}</p>
+                        </div>
+                      </div>
                       <button 
-                         onClick={() => {
-                           const link = document.createElement('a');
-                           link.href = pdfPreviewUrl!;
-                           link.download = `Invoice_${lastFinalizedBill.billNumber}.pdf`;
-                           link.click();
-                         }}
-                         className="py-3 sm:py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-700 shadow-xl shadow-blue-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs"
+                        onClick={() => {
+                          setShowFinalizeOverlay(false);
+                          setIsCreating(false);
+                          setLastFinalizedBill(null);
+                          setPdfPreviewUrl(null);
+                          setBillData({ customer: null, items: [], oldDue: 0, receivedAmount: 0, status: 'draft' });
+                        }}
+                        className="p-2.5 hover:bg-slate-100 rounded-xl transition-colors"
                       >
-                        <Download className="w-4 h-4 sm:w-5 h-5" />
-                        Download
+                        <X className="w-6 h-6 text-slate-400" />
+                      </button>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-4 sm:p-12 text-center bg-slate-50">
+                      <div className="max-w-xl mx-auto space-y-6 sm:space-y-8">
+                        <div>
+                          <h2 className="text-xl sm:text-3xl font-black text-slate-900 tracking-tight leading-tight mb-2">Record Success!</h2>
+                          <p className="text-xs text-slate-500 font-bold uppercase tracking-[0.1em]">Bill has been finalized and recorded</p>
+                        </div>
+                        
+                        <div className="bg-white border border-slate-200 rounded-2xl p-2 sm:p-4 shadow-sm">
+                           <div className="aspect-[1/1.4] w-full overflow-x-auto rounded-xl border border-slate-100" style={{ WebkitOverflowScrolling: 'touch' }}>
+                              <iframe 
+                                src={pdfPreviewUrl!} 
+                                className="w-full h-full border-none rounded-xl"
+                                title="Finalized Bill"
+                              />
+                           </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                           <button 
+                            onClick={() => shareBillOnWhatsApp(lastFinalizedBill)}
+                            className="py-3.5 sm:py-4 bg-emerald-600 text-white font-black rounded-2xl hover:bg-emerald-700 shadow-xl shadow-emerald-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs"
+                          >
+                            <Send className="w-4 h-4 sm:w-5 h-5" />
+                            WhatsApp Share
+                          </button>
+                          <button 
+                             onClick={() => {
+                               const link = document.createElement('a');
+                               link.href = pdfPreviewUrl!;
+                               link.download = `Invoice_${lastFinalizedBill.billNumber}.pdf`;
+                               link.click();
+                             }}
+                             className="py-3.5 sm:py-4 bg-blue-600 text-white font-black rounded-2xl hover:bg-blue-700 shadow-xl shadow-blue-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs"
+                          >
+                            <Download className="w-4 h-4 sm:w-5 h-5" />
+                            Download PDF
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-4 sm:p-6 bg-white border-t sticky bottom-0 z-20 flex flex-col items-stretch gap-3">
+                      <button 
+                        onClick={() => window.open(pdfPreviewUrl!, '_blank')}
+                        className="w-full py-4 bg-slate-100 text-slate-700 font-black rounded-2xl hover:bg-slate-200 transition-all uppercase tracking-widest text-[10px] sm:text-xs flex items-center justify-center gap-2"
+                      >
+                        <ExternalLink className="w-5 h-5" />
+                        Open Full Preview
                       </button>
                       <button 
                         onClick={() => {
@@ -1004,12 +1114,12 @@ const Sales: React.FC = () => {
                           setPdfPreviewUrl(null);
                           setBillData({ customer: null, items: [], oldDue: 0, receivedAmount: 0, status: 'draft' });
                         }}
-                        className="py-3 sm:py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-black transition-all uppercase tracking-widest text-[10px] sm:text-xs"
+                        className="w-full py-4 bg-slate-900 text-white font-black rounded-2xl hover:bg-black transition-all uppercase tracking-widest text-[10px] sm:text-xs shadow-xl"
                       >
-                        Finish
+                        Finish & New Entry
                       </button>
                     </div>
-                  </div>
+                  </>
                 )}
               </motion.div>
             </div>
@@ -1101,6 +1211,13 @@ const Sales: React.FC = () => {
                 >
                   <Printer className="w-4 h-4" />
                   Print / Share
+                </button>
+                <button 
+                  onClick={() => handleDownloadBill(bill)}
+                  className="p-2.5 bg-slate-50 text-slate-400 hover:text-indigo-600 rounded-xl transition-colors"
+                  title="Download PDF"
+                >
+                  <Download className="w-4 h-4" />
                 </button>
                 <button 
                   onClick={() => handleDeleteBill(bill)}
