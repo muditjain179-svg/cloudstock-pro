@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import Fuse from 'fuse.js';
 import { 
   collection, 
   onSnapshot, 
@@ -37,13 +38,6 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Link } from 'react-router-dom';
 import { cn, generateWhatsAppLink } from '../lib/utils';
 
-
-const normalizeText = (text: string): string => {
-  return text
-    .toLowerCase()
-    .replace(/[\s\-\/\[\]\(\)\.\_]+/g, '') // remove spaces and special chars
-    .trim();
-};
 
 const Inventory: React.FC = () => {
   const { user } = useAuth();
@@ -503,38 +497,38 @@ const Inventory: React.FC = () => {
     doc.save(`Stock-Summary-${today.replace(/\//g, '-')}.pdf`);
   };
 
-  const filteredItems = items.filter(item => {
-    const isSalesman = user?.role === 'salesman';
-    const myStock = salesmanInventory[item.id] || 0;
+  const fuse = useMemo(() => new Fuse(items, {
+    keys: [
+      { name: 'name', weight: 0.6 },
+      { name: 'brand', weight: 0.3 },
+      { name: 'category', weight: 0.1 },
+    ],
+    threshold: 0.4,
+    ignoreLocation: true,
+    useExtendedSearch: true,
+    includeScore: true,
+    minMatchCharLength: 1,
+  }), [items]);
+
+  const filteredItems = useMemo(() => {
+    let result = items;
     
-    // SALESMAN CAN ONLY SEE HIS INVENTORY (items with stock > 0)
-    // If admin is viewing a salesman, show items that salesman has stock of
-    // If admin is viewing main store, show all items
-    const matchesUserStock = !isSalesman || myStock > 0;
-    const matchesSelectedStock = (user?.role === 'admin' && selectedSalesmanId) ? (salesmanInventory[item.id] > 0) : true;
+    if (searchTerm.trim()) {
+      result = fuse.search(searchTerm).map(res => res.item);
+    }
 
-    const tokens = searchTerm.trim().toLowerCase().split(/\s+/).filter(t => t);
-
-    const matchesSearch = tokens.length === 0 || tokens.every(token => {
-      const normalizedToken = normalizeText(token);
-      const searchableFields = [
-        item.name || '',
-        item.brand || '',
-        item.category || '',
-      ];
-
-      return searchableFields.some(field => {
-        const normalizedField = normalizeText(field);
-        const originalField = field.toLowerCase();
-        return normalizedField.includes(normalizedToken) ||
-               originalField.includes(token.toLowerCase());
-      });
+    return result.filter(item => {
+      const isSalesman = user?.role === 'salesman';
+      const myStock = salesmanInventory[item.id] || 0;
+      
+      const matchesUserStock = !isSalesman || myStock > 0;
+      const matchesSelectedStock = (user?.role === 'admin' && selectedSalesmanId) ? (salesmanInventory[item.id] > 0) : true;
+      const matchesBrand = !filterBrand || item.brand === filterBrand;
+      const matchesCategory = !filterCategory || item.category === filterCategory;
+      
+      return matchesBrand && matchesCategory && matchesUserStock && matchesSelectedStock;
     });
-    const matchesBrand = !filterBrand || item.brand === filterBrand;
-    const matchesCategory = !filterCategory || item.category === filterCategory;
-    
-    return matchesSearch && matchesBrand && matchesCategory && matchesUserStock && matchesSelectedStock;
-  });
+  }, [items, searchTerm, fuse, user, salesmanInventory, selectedSalesmanId, filterBrand, filterCategory]);
 
   if (loading) return <div>Loading inventory...</div>;
 
@@ -581,7 +575,7 @@ const Inventory: React.FC = () => {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
           <input
             type="text"
-            placeholder="Search items..."
+            placeholder="Search anything — name, brand, even typos..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full pl-11 pr-4 py-3 bg-white border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none transition-shadow shadow-sm text-sm"

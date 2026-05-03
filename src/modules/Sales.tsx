@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   collection, 
   onSnapshot, 
@@ -13,6 +13,7 @@ import {
   deleteDoc,
   where
 } from 'firebase/firestore';
+import Fuse from 'fuse.js';
 import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { Bill, Item, Customer, BillItem, BillStatus } from '../types';
@@ -73,12 +74,36 @@ const Sales: React.FC = () => {
     status: 'draft'
   });
 
+  const [billDate, setBillDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [activeBills, setActiveBills] = useState<Bill[]>([]);
   const [draftBills, setDraftBills] = useState<Bill[]>([]);
   const [currentTab, setCurrentTab] = useState<'active' | 'drafts'>('active');
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [viewingDraft, setViewingDraft] = useState<Bill | null>(null);
   const [isFinalizing, setIsFinalizing] = useState<Bill | null>(null);
+  const addItemButtonRef = useRef<HTMLButtonElement>(null);
+  const inStockItems = useMemo(() => items.filter(i => {
+    const stock = user?.role === 'admin' ? i.mainStock : (salesmanInventory[i.id] || 0);
+    return (stock || 0) > 0;
+  }), [items, user, salesmanInventory]);
+
+  const itemFuse = useMemo(() => new Fuse(inStockItems, {
+    keys: [
+      { name: 'name', weight: 0.6 },
+      { name: 'brand', weight: 0.3 },
+      { name: 'category', weight: 0.1 },
+    ],
+    threshold: 0.4,
+    ignoreLocation: true,
+    useExtendedSearch: true,
+    includeScore: true,
+    minMatchCharLength: 1,
+  }), [inStockItems]);
+
+  const searchResults = useMemo(() => {
+    if (!itemSearch.trim()) return inStockItems;
+    return itemFuse.search(itemSearch).map(result => result.item);
+  }, [itemSearch, itemFuse, inStockItems]);
 
   const filteredCustomers = customers.filter(c => 
     c.name.toLowerCase().includes(customerSearch.toLowerCase()) || 
@@ -150,6 +175,14 @@ const Sales: React.FC = () => {
       ...billData,
       items: newItems
     });
+
+    // After adding new item row scroll to it
+    setTimeout(() => {
+      addItemButtonRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center'
+      });
+    }, 100);
   };
 
   const updateBillItem = (index: number, updates: Partial<BillItem>) => {
@@ -317,6 +350,16 @@ const Sales: React.FC = () => {
     }
     if (!user || isSaving) return;
 
+    // Date Validation
+    const todayStr = new Date().toISOString().split('T')[0];
+    const minD = new Date();
+    minD.setDate(minD.getDate() - 7);
+    const minStr = minD.toISOString().split('T')[0];
+    if (billDate > todayStr || billDate < minStr) {
+      alert("Invalid date. You can only pick dates from today up to 7 days back.");
+      return;
+    }
+
     if (status === 'finalized' && !showFinalizeOverlay) {
       setIsSaving(true);
       try {
@@ -328,7 +371,11 @@ const Sales: React.FC = () => {
           title: 'SALES BILL',
           themeColor: '#dc2626',
           salesman_name: user?.name || 'Staff',
-          date_issued: new Date().toLocaleDateString(),
+          date_issued: new Date(billDate).toLocaleDateString('en-IN', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric'
+          }),
           invoice_no: editingDraftId ? draftBills.find(d => d.id === editingDraftId)?.billNumber || 'DRAFT' : 'DRAFT',
           customer_name: billData.customer!.name,
           items: billData.items.map(i => {
@@ -395,10 +442,14 @@ const Sales: React.FC = () => {
         const grandTotalValue = calculateGrandTotal();
         const newBalanceValue = calculateNewBalance();
 
+        const selectedDate = new Date(billDate);
+        const now = new Date();
+        selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
+
         const billPayload: any = {
           billNumber: editingDraftId ? draftBills.find(d => d.id === editingDraftId)?.billNumber : `S-${Date.now().toString().slice(-6)}`,
           type: 'sale',
-          date: Timestamp.now(),
+          date: Timestamp.fromDate(selectedDate),
           entityId: billData.customer!.id,
           entityName: billData.customer!.name,
           entityPhone: billData.customer!.phone,
@@ -459,6 +510,7 @@ const Sales: React.FC = () => {
         setIsCreating(false);
         setEditingDraftId(null);
         setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
+        setBillDate(new Date().toISOString().split('T')[0]);
         if (editingDraftId) alert("Draft saved successfully");
       }
     } catch (error: any) {
@@ -599,6 +651,7 @@ const Sales: React.FC = () => {
               setIsCreating(false);
               setEditingDraftId(null);
               setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
+              setBillDate(new Date().toISOString().split('T')[0]);
             }} 
             className="flex items-center gap-2 px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-slate-200 transition-all active:scale-95 shadow-sm"
           >
@@ -610,6 +663,24 @@ const Sales: React.FC = () => {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">
+            {/* Date Selection */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+              <label className="block text-[10px] uppercase font-black text-slate-400 tracking-widest mb-2">Bill Date</label>
+              <input
+                type="date"
+                value={billDate}
+                min={(() => {
+                  const d = new Date();
+                  d.setDate(d.getDate() - 7);
+                  return d.toISOString().split('T')[0];
+                })()}
+                max={new Date().toISOString().split('T')[0]}
+                onChange={(e) => setBillDate(e.target.value)}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none text-sm font-bold transition-all"
+              />
+              <p className="mt-2 text-[10px] text-slate-400 font-medium italic">You can backdate up to 7 days</p>
+            </div>
+
             {/* Customer Selection */}
             <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
               <h2 className="font-bold flex items-center gap-2 mb-4">
@@ -652,21 +723,60 @@ const Sales: React.FC = () => {
 
             {/* Item Selection */}
             <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-              <h2 className="font-bold flex items-center gap-2 mb-4">
+              <h2 className="font-bold flex items-center gap-2 mb-6">
                 <PackageIcon className="w-5 h-5 text-indigo-500" />
-                Add Items
+                Items
               </h2>
 
               <div className="space-y-4">
-                <div className="flex justify-between items-center mb-2">
-                  <h3 className="text-[10px] uppercase font-black text-slate-400 tracking-widest">Added Items</h3>
+                {billData.items.map((item, idx) => (
+                  <div key={item.itemId} className="flex flex-col sm:flex-row items-start sm:items-center gap-4 p-4 bg-slate-50 rounded-xl border border-slate-100">
+                    <div className="flex-1 w-full">
+                      <p className="font-bold text-slate-900">{item.name}</p>
+                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                        Available: {user?.role === 'admin' ? items.find(i => i.id === item.itemId)?.mainStock : (salesmanInventory[item.itemId] || 0)}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3 w-full sm:w-auto">
+                      <div className="w-20 sm:w-24">
+                        <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Qty</label>
+                        <input 
+                          type="number" 
+                          value={item.quantity}
+                          min="0"
+                          max={user?.role === 'admin' ? items.find(i => i.id === item.itemId)?.mainStock : (salesmanInventory[item.itemId] || 0)}
+                          onChange={(e) => updateBillItem(idx, { quantity: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
+                          className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                        />
+                      </div>
+                      <div className="w-24 sm:w-32">
+                        <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Price</label>
+                        <input 
+                          type="number" 
+                          value={item.price}
+                          onChange={(e) => updateBillItem(idx, { price: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
+                          className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                        />
+                      </div>
+                      <button 
+                        onClick={() => setBillData({ ...billData, items: billData.items.filter((_, i) => i !== idx) })}
+                        className="mt-5 p-2.5 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors sm:mt-5"
+                      >
+                        <Trash2 className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+
+                <div className="pt-2">
                   {!showItemSearch && (
                     <button 
+                      ref={addItemButtonRef}
                       onClick={() => setShowItemSearch(true)}
-                      className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-bold hover:bg-indigo-700 transition-all uppercase tracking-wider shadow-md shadow-indigo-100 active:scale-95"
+                      className="w-full sm:w-auto min-h-[44px] sm:min-h-[unset] flex items-center justify-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl text-xs font-black hover:bg-indigo-700 transition-all uppercase tracking-widest shadow-xl shadow-indigo-100 active:scale-95"
                     >
-                      <Plus className="w-4 h-4" />
-                      ADD ITEM
+                      <Plus className="w-5 h-5" />
+                      Add Item
                     </button>
                   )}
                 </div>
@@ -684,7 +794,7 @@ const Sales: React.FC = () => {
                         <input
                           autoFocus
                           type="text"
-                          placeholder="WRITE ITEM NAME..."
+                          placeholder="Search by name, brand, category..."
                           value={itemSearch}
                           onChange={(e) => setItemSearch(e.target.value)}
                           className="w-full pl-12 pr-12 py-4 bg-slate-50 border-2 border-indigo-100 rounded-2xl focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none text-sm font-bold placeholder:text-slate-400 transition-all uppercase tracking-tight"
@@ -697,90 +807,42 @@ const Sales: React.FC = () => {
                         </button>
                       </div>
 
-                      {itemSearch && (
-                        <motion.div 
-                          initial={{ opacity: 0, y: 10 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          className="absolute z-50 w-full mt-2 bg-white border border-slate-100 rounded-2xl shadow-2xl overflow-hidden max-h-64 overflow-y-auto"
-                        >
-                          {items
-                            .filter(i => {
-                              const stock = user?.role === 'admin' ? i.mainStock : (salesmanInventory[i.id] || 0);
-                              const matchesSearch = i.name.toLowerCase().includes(itemSearch.toLowerCase()) || i.brand.toLowerCase().includes(itemSearch.toLowerCase());
-                              return stock > 0 && matchesSearch;
-                            })
-                            .map(item => (
-                              <button
-                                key={item.id}
-                                onClick={() => {
-                                  addItemToBill(item);
-                                  setItemSearch('');
-                                  setShowItemSearch(false);
-                                }}
-                                className="w-full text-left px-5 py-4 hover:bg-indigo-50 transition-colors flex justify-between items-center group"
-                              >
-                                <div>
-                                  <p className="font-bold text-slate-900 group-hover:text-indigo-700">{item.name}</p>
-                                  <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">{item.brand} • {item.category}</p>
-                                </div>
-                                <div className="text-right">
-                                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Stock Available</p>
-                                  <p className="text-base font-black text-indigo-600">
-                                    {user?.role === 'admin' ? item.mainStock : (salesmanInventory[item.id] || 0)}
-                                  </p>
-                                </div>
-                              </button>
-                            ))}
-                          {items.filter(i => {
-                            const stock = user?.role === 'admin' ? i.mainStock : (salesmanInventory[i.id] || 0);
-                            return stock > 0 && (i.name.toLowerCase().includes(itemSearch.toLowerCase()) || i.brand.toLowerCase().includes(itemSearch.toLowerCase()));
-                          }).length === 0 && (
-                            <div className="p-8 text-center bg-slate-50/50">
-                              <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">No matching items in stock</p>
+                      <motion.div 
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="absolute z-50 w-full mt-2 bg-white border border-slate-100 rounded-2xl shadow-2xl overflow-hidden max-h-64 overflow-y-auto"
+                      >
+                        {searchResults.map(item => (
+                          <button
+                            key={item.id}
+                            onClick={() => {
+                              addItemToBill(item);
+                              setItemSearch('');
+                              setShowItemSearch(false);
+                            }}
+                            className="w-full text-left px-5 py-4 hover:bg-indigo-50 transition-colors flex justify-between items-center group"
+                          >
+                            <div>
+                              <p className="font-bold text-slate-900 group-hover:text-indigo-700">{item.name}</p>
+                              <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">{item.brand} • {item.category}</p>
                             </div>
-                          )}
-                        </motion.div>
-                      )}
+                            <div className="text-right">
+                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Stock Available</p>
+                              <p className="text-base font-black text-indigo-600">
+                                {user?.role === 'admin' ? item.mainStock : (salesmanInventory[item.id] || 0)}
+                              </p>
+                            </div>
+                          </button>
+                        ))}
+                        {searchResults.length === 0 && (
+                          <div className="p-8 text-center bg-slate-50/50">
+                            <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">No matching items in stock</p>
+                          </div>
+                        )}
+                      </motion.div>
                     </motion.div>
                   )}
                 </AnimatePresence>
-
-                {billData.items.map((item, idx) => (
-                  <div key={item.itemId} className="flex items-center gap-4 p-4 bg-slate-50 rounded-xl border border-slate-100">
-                    <div className="flex-1">
-                      <p className="font-bold">{item.name}</p>
-                      <p className="text-xs text-slate-400">
-                        Available: {user?.role === 'admin' ? items.find(i => i.id === item.itemId)?.mainStock : (salesmanInventory[item.itemId] || 0)}
-                      </p>
-                    </div>
-                    <div className="w-24">
-                      <label className="text-[10px] uppercase font-bold text-slate-400">Qty</label>
-                      <input 
-                        type="number" 
-                        value={item.quantity}
-                        min="0"
-                        max={user?.role === 'admin' ? items.find(i => i.id === item.itemId)?.mainStock : (salesmanInventory[item.itemId] || 0)}
-                        onChange={(e) => updateBillItem(idx, { quantity: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
-                        className="w-full px-2 py-1 border rounded-md focus:ring-2 focus:ring-indigo-500 outline-none"
-                      />
-                    </div>
-                    <div className="w-24">
-                      <label className="text-[10px] uppercase font-bold text-slate-400">Price</label>
-                      <input 
-                        type="number" 
-                        value={item.price}
-                        onChange={(e) => updateBillItem(idx, { price: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
-                        className="w-full px-2 py-1 border rounded-md"
-                      />
-                    </div>
-                    <button 
-                      onClick={() => setBillData({ ...billData, items: billData.items.filter((_, i) => i !== idx) })}
-                      className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
               </div>
             </div>
           </div>
