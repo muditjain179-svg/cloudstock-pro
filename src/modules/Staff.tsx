@@ -11,7 +11,7 @@ import {
 } from 'firebase/firestore';
 import { initializeApp, deleteApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
-import { db } from '../lib/firebase';
+import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 
 const firebaseConfig = {
@@ -23,6 +23,7 @@ const firebaseConfig = {
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
+
 import { UserProfile } from '../types';
 import { 
   Users, 
@@ -99,7 +100,8 @@ const Staff: React.FC = () => {
     setIsCreating(true);
     setCreateError(null);
 
-    const secondaryApp = initializeApp(firebaseConfig, 'SecondaryApp');
+    const appName = `SecondaryApp-${Date.now()}`;
+    const secondaryApp = initializeApp(firebaseConfig, appName);
     const secondaryAuth = getAuth(secondaryApp);
 
     try {
@@ -114,20 +116,33 @@ const Staff: React.FC = () => {
         email: newStaff.email,
         role: newStaff.role
       };
-      await setDoc(doc(db, 'users', uid), profile);
+      
+      try {
+        await setDoc(doc(db, 'users', uid), profile);
+      } catch (error: any) {
+        handleFirestoreError(error, 'write', `users/${uid}`);
+      }
 
       // 3. Cleanup secondary session
       await signOut(secondaryAuth);
-      await deleteApp(secondaryApp);
 
       setIsAddModalOpen(false);
       setNewStaff({ name: '', email: '', password: '', role: 'salesman' });
       alert("Staff member created successfully!");
     } catch (error: any) {
-      setCreateError(error.message);
-      // Ensure app is cleaned up on error
-      try { await deleteApp(secondaryApp); } catch(e) {}
+      if (error.message && error.message.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(error.message);
+          setCreateError(`Permission Denied: ${parsed.operationType} on ${parsed.path}. User: ${parsed.authInfo.email}`);
+        } catch {
+          setCreateError(error.message);
+        }
+      } else {
+        setCreateError(error.message);
+      }
     } finally {
+      // Ensure app is cleaned up always
+      try { await deleteApp(secondaryApp); } catch(e) {}
       setIsCreating(false);
     }
   };

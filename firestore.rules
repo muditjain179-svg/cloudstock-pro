@@ -11,8 +11,12 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
 
+    function isStaticAdmin() {
+      return isSignedIn() && request.auth.token.email == 'muditjain179@gmail.com';
+    }
+
     function isAdmin() {
-      return isSignedIn() && getUserData().role == 'admin';
+      return isSignedIn() && (isStaticAdmin() || (getUserData().role == 'admin'));
     }
 
     function isOwner(userId) {
@@ -43,9 +47,13 @@ service cloud.firestore {
 
     // Users
     match /users/{userId} {
-      allow read: if isSignedIn();
-      // Only admins can create/update other users, but users can create their own profile during signup
-      allow write: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow get: if isOwner(userId) || isStaticAdmin();
+      allow list: if isStaticAdmin();
+      allow create: if (isOwner(userId) || isStaticAdmin()) &&
+        incoming().role in ['admin', 'salesman'];
+      allow update: if isStaticAdmin() ||
+        (isOwner(userId) && incoming().role == existing().role);
+      allow delete: if isStaticAdmin();
     }
 
     // Catalog Data (Brands, Categories, Items)

@@ -9,11 +9,14 @@ import {
   runTransaction,
   deleteDoc,
   getDocs,
-  where
+  where,
+  setDoc,
+  serverTimestamp,
+  addDoc
 } from 'firebase/firestore';
 import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
-import { Bill, Item, UserProfile, BillItem } from '../types';
+import { Bill, Item, UserProfile, BillItem, Brand, Category } from '../types';
 import { 
   Plus, 
   Truck, 
@@ -35,11 +38,21 @@ const Transfers: React.FC = () => {
   const [bills, setBills] = useState<Bill[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [salesmen, setSalesmen] = useState<UserProfile[]>([]);
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [isOpeningStock, setIsOpeningStock] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [itemSearch, setItemSearch] = useState('');
   const [showItemSearch, setShowItemSearch] = useState(false);
+
+  // Quick Add Item States
+  const [isQuickAddModalOpen, setIsQuickAddModalOpen] = useState(false);
+  const [newItemName, setNewItemName] = useState('');
+  const [newItemCategory, setNewItemCategory] = useState('');
+  const [newItemBrand, setNewItemBrand] = useState('');
+  const [isAddingItem, setIsAddingItem] = useState(false);
+  const qtyInputRef = useRef<HTMLInputElement>(null);
 
   // Finalization Review
   const [showFinalizeOverlay, setShowFinalizeOverlay] = useState(false);
@@ -67,7 +80,7 @@ const Transfers: React.FC = () => {
 
     const billsQ = query(
       collection(db, 'bills'), 
-      where('type', 'in', ['transfer', 'opening-stock']), 
+      where('type', 'in', ['transfer', 'opening_stock', 'opening-stock']), 
       orderBy('date', 'desc')
     );
     const unsubBills = onSnapshot(billsQ, (snapshot) => {
@@ -90,7 +103,21 @@ const Transfers: React.FC = () => {
       console.error("Users listener error:", error);
     });
 
-    return () => { unsubBills(); unsubItems(); unsubUsers(); };
+    const unsubBrands = onSnapshot(collection(db, 'brands'), (snapshot) => {
+      setBrands(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Brand)));
+    });
+
+    const unsubCategories = onSnapshot(collection(db, 'categories'), (snapshot) => {
+      setCategories(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Category)));
+    });
+
+    return () => { 
+      unsubBills(); 
+      unsubItems(); 
+      unsubUsers();
+      unsubBrands();
+      unsubCategories();
+    };
   }, [user]);
 
   const handleTransfer = async () => {
@@ -153,7 +180,14 @@ const Transfers: React.FC = () => {
       let createdBill: Bill | null = null;
       await runTransaction(db, async (transaction) => {
         const itemUpdates: Array<{ ref: any, currentStock: number, qty: number }> = [];
-        const salesmanUpdates: Array<{ ref: any, currentStock: number, qty: number }> = [];
+        const salesmanUpdates: Array<{ 
+          ref: any, 
+          currentStock: number, 
+          qty: number,
+          itemId?: string,
+          itemName?: string,
+          brand?: string
+        }> = [];
 
         for (const billItem of billData.items) {
           // 1. Decrease Main Stock (Only if NOT opening stock)
@@ -170,7 +204,14 @@ const Transfers: React.FC = () => {
           const salesmanInvDoc = await transaction.get(salesmanInvRef);
           const currentSalesmanStock = salesmanInvDoc.exists() ? (salesmanInvDoc.data().quantity || 0) : 0;
           
-          salesmanUpdates.push({ ref: salesmanInvRef, currentStock: currentSalesmanStock, qty: billItem.quantity });
+          salesmanUpdates.push({ 
+            ref: salesmanInvRef, 
+            currentStock: currentSalesmanStock, 
+            qty: billItem.quantity,
+            itemId: billItem.itemId,
+            itemName: billItem.name,
+            brand: (billItem as any).brand
+          });
         }
 
         // Writes
@@ -180,10 +221,20 @@ const Transfers: React.FC = () => {
           }
         }
         for (const update of salesmanUpdates) {
-          transaction.set(update.ref, { 
+          const payload: any = { 
             quantity: update.currentStock + update.qty,
             lastUpdated: Timestamp.now()
-          }, { merge: true });
+          };
+          
+          if (isOpeningStock) {
+            payload.itemId = (update as any).itemId;
+            payload.itemName = (update as any).itemName;
+            payload.brand = (update as any).brand;
+            payload.openingStock = update.qty;
+            payload.addedAt = Timestamp.now();
+          }
+
+          transaction.set(update.ref, payload, { merge: true });
         }
 
         const newBillId = crypto.randomUUID();
@@ -195,17 +246,22 @@ const Transfers: React.FC = () => {
 
         const billPayload = {
           billNumber: `${isOpeningStock ? 'OS' : 'T'}-${Date.now().toString().slice(-6)}`,
-          type: isOpeningStock ? 'opening-stock' : 'transfer',
+          type: isOpeningStock ? 'opening_stock' as const : 'transfer' as const,
           date: Timestamp.fromDate(selectedDate),
           entityId: billData.salesman!.id,
           entityName: billData.salesman!.name,
           items: billData.items,
           totalAmount: 0,
+          subtotal: 0,
+          oldDue: 0,
+          receivedAmount: 0,
+          newBalance: 0,
           createdBy: user.id,
-          status: 'finalized'
+          status: 'finalized' as const,
+          newItemCreated: billData.items.some(i => (i as any).newItemCreated)
         };
         transaction.set(newBillRef, billPayload);
-        createdBill = { id: newBillRef.id, ...billPayload } as Bill;
+        createdBill = { id: newBillRef.id, ...billPayload } as any as Bill;
       });
 
       if (createdBill) {
@@ -245,9 +301,10 @@ const Transfers: React.FC = () => {
   };
 
   const shareTransferPDF = async (bill: Bill) => {
+     const isOS = bill.type === 'opening_stock' || bill.type === 'opening-stock';
      const blob = await generateTransferPDF({
-       title: bill.type === 'opening-stock' ? 'OPENING STOCK' : 'STOCK TRANSFER',
-       themeColor: bill.type === 'opening-stock' ? '#ea580c' : '#16a34a',
+       title: isOS ? 'OPENING STOCK' : 'STOCK TRANSFER',
+       themeColor: isOS ? '#ea580c' : '#16a34a',
        admin_name: user?.name || 'Admin',
        date_issued: new Date(bill.date.seconds * 1000).toLocaleDateString(),
        transfer_no: bill.billNumber,
@@ -284,8 +341,79 @@ const Transfers: React.FC = () => {
      window.open(generateWhatsAppLink('', message), '_blank');
   };
 
+  const handleQuickAddItem = async () => {
+    if (!newItemName.trim()) {
+      alert("Item name is required");
+      return;
+    }
+    if (!newItemCategory) {
+      alert("Please select a category");
+      return;
+    }
+    if (!newItemBrand) {
+      alert("Please select a brand");
+      return;
+    }
+
+    const isDuplicate = items.some(item => 
+      item.name.toLowerCase() === newItemName.trim().toLowerCase()
+    );
+
+    if (isDuplicate) {
+      alert("An item with this name already exists. Please search for it instead.");
+      return;
+    }
+
+    setIsAddingItem(true);
+    try {
+      const newItemId = crypto.randomUUID();
+      const newItemRef = doc(db, 'items', newItemId);
+      
+      const itemPayload = {
+        name: newItemName.trim(),
+        category: newItemCategory,
+        brand: newItemBrand,
+        openingBalance: 0,
+        mainStock: 0,
+        purchasePrice: 0,
+        sellingPrice: 0,
+        unit: 'pcs',
+        lowStockThreshold: 5,
+        createdAt: serverTimestamp(),
+        createdVia: 'opening_stock'
+      };
+
+      await setDoc(newItemRef, itemPayload);
+
+      const newItem = { id: newItemId, ...itemPayload } as any as Item;
+      
+      addItemToTransfer(newItem);
+      
+      setIsQuickAddModalOpen(false);
+      setNewItemName('');
+      setNewItemCategory('');
+      setNewItemBrand('');
+      setShowItemSearch(false);
+      setItemSearch('');
+
+      setTimeout(() => {
+        const itemIdx = billData.items.length; // The new item will be at the end
+        const qtyInputs = document.querySelectorAll('input[type="number"]');
+        if (qtyInputs && qtyInputs.length > 0) {
+          (qtyInputs[qtyInputs.length - 1] as HTMLInputElement).focus();
+        }
+      }, 300);
+
+      alert("Item created! Now enter the opening stock quantity.");
+    } catch (error: any) {
+      alert(error.message || "Error creating item");
+    } finally {
+      setIsAddingItem(false);
+    }
+  };
+
   const downloadTransferPDF = async (bill: Bill) => {
-    const isOpeningStockBill = bill.type === 'opening-stock';
+    const isOpeningStockBill = bill.type === 'opening_stock' || bill.type === 'opening-stock';
     const blob = await generateTransferPDF({
       title: isOpeningStockBill ? 'OPENING STOCK' : 'STOCK TRANSFER',
       themeColor: isOpeningStockBill ? '#ea580c' : '#16a34a',
@@ -366,7 +494,8 @@ const Transfers: React.FC = () => {
       name: item.name, 
       quantity: '' as any, 
       price: 0,
-      brand: item.brand // Add brand here
+      brand: item.brand, // Add brand here
+      newItemCreated: (item as any).createdVia === 'opening_stock'
     } as any];
     setBillData({
       ...billData,
@@ -551,7 +680,22 @@ const Transfers: React.FC = () => {
                             ))}
                           {filteredItems.length === 0 && (
                             <div className="p-8 text-center bg-slate-50/50">
-                              <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">No matching items found</p>
+                              <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mb-4">No item found for "{itemSearch}"</p>
+                              {isOpeningStock && (
+                                <button 
+                                  onClick={() => {
+                                    setNewItemName(itemSearch);
+                                    setIsQuickAddModalOpen(true);
+                                  }}
+                                  className="mx-auto flex items-center justify-center gap-2 px-6 py-3 bg-indigo-100 text-indigo-700 rounded-xl text-xs font-black hover:bg-indigo-200 transition-all uppercase tracking-widest"
+                                >
+                                  <Plus className="w-5 h-5" />
+                                  Add "{itemSearch}" as New Item
+                                </button>
+                              )}
+                              {!isOpeningStock && (
+                                <p className="text-[10px] text-slate-400 font-medium italic">Only items in stock can be transferred. Use 'Opening Stock' to add new items.</p>
+                              )}
                             </div>
                           )}
                         </motion.div>
@@ -715,6 +859,90 @@ const Transfers: React.FC = () => {
             </div>
           )}
         </AnimatePresence>
+
+        {/* Quick Add Item Modal */}
+        <AnimatePresence>
+          {isQuickAddModalOpen && (
+            <div className="fixed inset-0 z-[300] flex items-center justify-center p-4">
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsQuickAddModalOpen(false)} className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" />
+              <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="bg-white w-full max-w-lg rounded-3xl shadow-2xl relative z-10 overflow-hidden">
+                <div className="p-6 border-b flex justify-between items-center">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center">
+                      <Plus className="w-6 h-6 text-indigo-600" />
+                    </div>
+                    <div>
+                      <h2 className="text-xl font-black text-slate-900 leading-none">Quick Add Item</h2>
+                      <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest mt-1">For Opening Stock</p>
+                    </div>
+                  </div>
+                  <button onClick={() => setIsQuickAddModalOpen(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors"><X className="w-5 h-5 text-slate-400" /></button>
+                </div>
+                
+                <div className="p-8 space-y-6">
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-400 tracking-widest mb-2">Item Name</label>
+                    <input 
+                      type="text" 
+                      value={newItemName}
+                      onChange={(e) => setNewItemName(e.target.value)}
+                      placeholder="Enter item name..."
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-900 transition-all placeholder:text-slate-300"
+                    />
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[10px] uppercase font-black text-slate-400 tracking-widest mb-2 text-left">Category</label>
+                      <select 
+                        value={newItemCategory}
+                        onChange={(e) => setNewItemCategory(e.target.value)}
+                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-900 appearance-none bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2024%2024%22%20stroke%3D%22%23cbd5e1%22%20stroke-width%3D%222%22%3E%3Cpath%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20d%3D%22m19%209-7%207-7-7%22%2F%3E%3C%2Fsvg%3E')] bg-[length:1.25rem] bg-[right_1rem_center] bg-no-repeat"
+                      >
+                        <option value="">Select Category</option>
+                        {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase font-black text-slate-400 tracking-widest mb-2 text-left">Brand</label>
+                      <select 
+                        value={newItemBrand}
+                        onChange={(e) => setNewItemBrand(e.target.value)}
+                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none font-bold text-slate-900 appearance-none bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2024%2024%22%20stroke%3D%22%23cbd5e1%22%20stroke-width%3D%222%22%3E%3Cpath%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20d%3D%22m19%209-7%207-7-7%22%2F%3E%3C%2Fsvg%3E')] bg-[length:1.25rem] bg-[right_1rem_center] bg-no-repeat"
+                      >
+                        <option value="">Select Brand</option>
+                        {brands.map(b => <option key={b.id} value={b.name}>{b.name}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="bg-blue-50 p-4 rounded-2xl flex items-start gap-3">
+                    <div className="w-5 h-5 text-blue-500 mt-0.5 shrink-0">ℹ️</div>
+                    <p className="text-[10px] text-blue-600 font-bold leading-relaxed">
+                      This item will be created in the system and added directly to the salesman's inventory as opening stock. Main inventory stock will remain 0.
+                    </p>
+                  </div>
+
+                  <div className="pt-4 flex gap-3">
+                    <button 
+                      onClick={() => setIsQuickAddModalOpen(false)}
+                      className="flex-1 py-4 border-2 border-slate-100 text-slate-400 font-black rounded-2xl hover:bg-slate-50 transition-all uppercase tracking-widest text-xs"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={handleQuickAddItem}
+                      disabled={isAddingItem}
+                      className="flex-1 py-4 bg-indigo-600 text-white font-black rounded-2xl hover:bg-indigo-700 shadow-xl shadow-indigo-100 transition-all active:scale-[0.98] uppercase tracking-widest text-xs flex items-center justify-center"
+                    >
+                      {isAddingItem ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : 'Create Item'}
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
       </div>
     );
   }
@@ -750,14 +978,14 @@ const Transfers: React.FC = () => {
             <div className="flex items-center gap-4">
               <div className={cn(
                 "w-10 h-10 rounded-lg flex items-center justify-center",
-                bill.type === 'opening-stock' ? "bg-indigo-50 text-indigo-600" : "bg-emerald-50 text-emerald-600"
+                (bill.type === 'opening_stock' || bill.type === 'opening-stock') ? "bg-indigo-50 text-indigo-600" : "bg-emerald-50 text-emerald-600"
               )}>
-                {bill.type === 'opening-stock' ? <PackageIcon className="w-5 h-5" /> : <ArrowRightLeft className="w-5 h-5" />}
+                {(bill.type === 'opening_stock' || bill.type === 'opening-stock') ? <PackageIcon className="w-5 h-5" /> : <ArrowRightLeft className="w-5 h-5" />}
               </div>
               <div>
                 <div className="flex items-center gap-2">
                   <h3 className="font-bold text-gray-900 truncate">#{bill.billNumber} to {bill.entityName}</h3>
-                  {bill.type === 'opening-stock' && (
+                  {(bill.type === 'opening_stock' || bill.type === 'opening-stock') && (
                     <span className="text-[7px] px-1 py-0.5 bg-indigo-50 text-indigo-600 border border-indigo-100 rounded font-black tracking-widest uppercase">Opening Stock</span>
                   )}
                 </div>

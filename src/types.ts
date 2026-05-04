@@ -54,7 +54,7 @@ export interface BillItem {
   price: number;
 }
 
-export type BillType = 'sale' | 'purchase' | 'transfer' | 'opening-stock';
+export type BillType = 'sale' | 'purchase' | 'transfer' | 'opening-stock' | 'opening_stock';
 export type BillStatus = 'draft' | 'finalized';
 
 export interface Bill {
