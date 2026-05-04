@@ -7,6 +7,7 @@ import { UserProfile } from '../types';
 interface AuthContextType {
   user: UserProfile | null;
   loading: boolean;
+  authError: string | null;
   signIn: () => Promise<void>;
   signInWithEmail: (email: string, pass: string) => Promise<void>;
   signUpWithEmail: (email: string, pass: string, name: string) => Promise<void>;
@@ -24,11 +25,13 @@ export const useAuth = () => {
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       try {
+        setAuthError(null);
         if (firebaseUser) {
           const userRef = doc(db, 'users', firebaseUser.uid);
           const userDoc = await getDoc(userRef);
@@ -36,23 +39,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (userDoc.exists()) {
             setUser(userDoc.data() as UserProfile);
           } else {
-            const profile: UserProfile = {
-              id: firebaseUser.uid,
-              email: firebaseUser.email || '',
-              name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'New User',
-              role: 'salesman'
-            };
+            // Check if it's the primary admin, we can auto-create that
             if (firebaseUser.email === 'muditjain179@gmail.com') {
-              profile.role = 'admin';
+              const profile: UserProfile = {
+                id: firebaseUser.uid,
+                email: firebaseUser.email || '',
+                name: firebaseUser.displayName || 'Admin',
+                role: 'admin'
+              };
+              await setDoc(userRef, profile);
+              setUser(profile);
+            } else {
+              // For other users, if profile doesn't exist, it means setup is incomplete
+              console.warn('User profile not found in Firestore for uid:', firebaseUser.uid);
+              setAuthError('Account setup incomplete. Contact your admin.');
+              await signOut(auth);
+              setUser(null);
             }
-            await setDoc(userRef, profile);
-            setUser(profile);
           }
         } else {
           setUser(null);
         }
-      } catch (error) {
+      } catch (error: any) {
         console.error("Auth initialization error:", error);
+        setAuthError('Failed to load profile. Please try again.');
+        await signOut(auth);
+        setUser(null);
       } finally {
         setLoading(false);
       }
@@ -97,11 +109,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const value = useMemo(() => ({ 
     user, 
     loading, 
+    authError,
     signIn, 
     signInWithEmail, 
     signUpWithEmail, 
     logout 
-  }), [user, loading]);
+  }), [user, loading, authError]);
 
   return (
     <AuthContext.Provider value={value}>

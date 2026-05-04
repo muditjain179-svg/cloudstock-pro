@@ -225,7 +225,7 @@ const MainLayout: React.FC = () => {
 
 // Login Screen
 const Login: React.FC = () => {
-  const { signIn, signInWithEmail, signUpWithEmail, user, loading } = useAuth();
+  const { signIn, signInWithEmail, signUpWithEmail, user, loading, authError } = useAuth();
   const navigate = useNavigate();
   const [useEmail, setUseEmail] = useState(false);
   const [isSignUp, setIsSignUp] = useState(false);
@@ -239,8 +239,36 @@ const Login: React.FC = () => {
     if (user) navigate('/');
   }, [user, navigate]);
 
+  useEffect(() => {
+    if (authError) setError(authError);
+  }, [authError]);
+
+  const getErrorMessage = (code: string) => {
+    switch (code) {
+      case 'auth/user-not-found':
+        return 'No account found with this email';
+      case 'auth/wrong-password':
+        return 'Incorrect password';
+      case 'auth/invalid-credential':
+        return 'Invalid email or password';
+      case 'auth/network-request-failed':
+        return 'Network error. Check your connection';
+      case 'auth/too-many-requests':
+        return 'Too many attempts. Try again later';
+      case 'auth/email-already-in-use':
+        return 'An account already exists with this email';
+      case 'auth/weak-password':
+        return 'Password should be at least 6 characters';
+      case 'auth/invalid-email':
+        return 'Invalid email address';
+      default:
+        return 'An error occurred. Please try again.';
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setIsSubmitting(true);
     setError(null);
     try {
@@ -250,13 +278,32 @@ const Login: React.FC = () => {
         await signInWithEmail(email, password);
       }
     } catch (err: any) {
-      setError(err.message);
+      console.error("Login attempt error:", err);
+      setError(getErrorMessage(err.code));
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  if (loading) return null;
+  if (loading) return (
+    <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4">
+      <motion.div
+        animate={{ 
+          rotate: 360,
+          scale: [1, 1.1, 1],
+        }}
+        transition={{ 
+          rotate: { repeat: Infinity, duration: 1.5, ease: "linear" },
+          scale: { repeat: Infinity, duration: 2, ease: "easeInOut" }
+        }}
+        className="w-16 h-16 border-4 border-indigo-600 border-t-transparent rounded-full mb-6"
+      />
+      <div className="flex flex-col items-center gap-2">
+        <h2 className="text-white font-black tracking-widest uppercase text-xs">CloudStock</h2>
+        <p className="text-slate-500 font-bold uppercase tracking-[0.3em] text-[8px]">Securing Session...</p>
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
