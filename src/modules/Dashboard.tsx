@@ -3,6 +3,7 @@ import { collection, query, orderBy, limit, onSnapshot, getDocs, where } from 'f
 import { Link } from 'react-router-dom';
 import { db } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { useAppData } from '../lib/useAppData';
 import { Bill, Item } from '../types';
 import { 
   TrendingUp, 
@@ -20,6 +21,7 @@ import { formatCurrency, cn } from '../lib/utils';
 
 const Dashboard: React.FC = () => {
   const { user } = useAuth();
+  const { data: items } = useAppData<Item>('items');
   const [stats, setStats] = useState({
     totalSales: 0,
     mainStock: 0,
@@ -36,6 +38,21 @@ const Dashboard: React.FC = () => {
     : lowStockItems.slice(0, 6);
 
   useEffect(() => {
+    if (!user || user.role !== 'admin') return;
+
+    let mainStock = 0;
+    const lowStock: Item[] = [];
+    items.forEach(item => {
+      mainStock += item.mainStock || 0;
+      if ((item.mainStock || 0) < (item.lowStockThreshold || 5)) {
+        lowStock.push(item);
+      }
+    });
+    setLowStockItems(lowStock);
+    setStats(prev => ({ ...prev, mainStock, lowStockCount: lowStock.length }));
+  }, [items, user]);
+
+  useEffect(() => {
     if (!user) return;
 
     // Recent Bills - Filtered by user if salesman
@@ -47,24 +64,6 @@ const Dashboard: React.FC = () => {
       setRecentBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
     }, (error) => {
       console.error("Dashboard bills listener error:", error);
-    });
-
-    // Items list for reference (metadata)
-    const unsubItems = onSnapshot(collection(db, 'items'), (snapshot) => {
-      const items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Item));
-      
-      if (user.role === 'admin') {
-        let mainStock = 0;
-        const lowStock: Item[] = [];
-        items.forEach(item => {
-          mainStock += item.mainStock || 0;
-          if ((item.mainStock || 0) < (item.lowStockThreshold || 5)) {
-            lowStock.push(item);
-          }
-        });
-        setLowStockItems(lowStock);
-        setStats(prev => ({ ...prev, mainStock, lowStockCount: lowStock.length }));
-      }
     });
 
     // Salesman personal inventory listener if needed
@@ -124,7 +123,7 @@ const Dashboard: React.FC = () => {
     };
 
     fetchSales();
-    return () => { unsubBills(); unsubItems(); unsubSalesmanInv(); };
+    return () => { unsubBills(); unsubSalesmanInv(); };
   }, [user]);
 
   const cards = [

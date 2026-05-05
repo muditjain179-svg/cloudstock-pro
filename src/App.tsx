@@ -2,9 +2,11 @@ import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate, useLocation } from 'react-router-dom';
 import { LogOut, LayoutDashboard, Package, ShoppingCart, Truck, Users, Menu, X, Tag, Layers, Wifi, WifiOff, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { collection, onSnapshot } from 'firebase/firestore';
+import { collection, onSnapshot, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from './lib/firebase';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { isCacheFresh, setCache, clearCache } from './lib/appStore';
+import { clearIndexedDB } from './lib/indexedDB';
 
 // Modules
 const Dashboard = lazy(() => import('./modules/Dashboard'));
@@ -73,6 +75,25 @@ const MainLayout: React.FC = () => {
   useEffect(() => {
     if (!user) return;
     
+    // Preload critical collections for caching
+    const preloadCollections = async () => {
+      const collectionsToPreload = ['items', 'brands', 'categories', 'customers', 'suppliers'];
+      for (const colName of collectionsToPreload) {
+        if (!isCacheFresh(colName)) {
+          try {
+            const q = query(collection(db, colName), orderBy('name', 'asc'));
+            const snapshot = await getDocs(q);
+            const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setCache(colName, data);
+          } catch (error) {
+            console.warn(`Silent preload failed for ${colName}:`, error);
+          }
+        }
+      }
+    };
+
+    preloadCollections();
+
     let unsub: () => void;
 
     if (user.role === 'admin') {
@@ -186,7 +207,11 @@ const MainLayout: React.FC = () => {
               </div>
             </div>
             <button
-              onClick={logout}
+              onClick={() => {
+                logout();
+                clearCache();
+                clearIndexedDB();
+              }}
               className="flex items-center gap-3 w-full px-4 py-2 rounded-lg text-rose-400 hover:bg-rose-900/20 transition-colors text-xs font-bold"
             >
               <LogOut className="w-4 h-4" />

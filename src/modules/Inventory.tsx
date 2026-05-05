@@ -3,21 +3,22 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import Fuse from 'fuse.js';
 import { 
-  collection, 
-  onSnapshot, 
   addDoc, 
   updateDoc, 
   doc, 
   deleteDoc, 
-  query, 
-  orderBy,
   setDoc,
   getDocs,
-  where
+  where,
+  collection,
+  query,
+  orderBy,
+  onSnapshot
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
-import { Item, SalesmanInventory, Brand, Category, UserProfile } from '../types';
+import { useAppData } from '../lib/useAppData';
+import { Item, Brand, Category, UserProfile } from '../types';
 import { 
   Plus, 
   Search, 
@@ -41,14 +42,20 @@ import { cn, generateWhatsAppLink } from '../lib/utils';
 
 const Inventory: React.FC = () => {
   const { user } = useAuth();
-  const [items, setItems] = useState<Item[]>([]);
-  const [brands, setBrands] = useState<Brand[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [allSalesmen, setAllSalesmen] = useState<UserProfile[]>([]);
+  
+  const { data: items, isLoading: itemsLoading } = useAppData<Item>('items', [orderBy('name')]);
+  const { data: brands } = useAppData<Brand>('brands', [orderBy('name')]);
+  const { data: categories } = useAppData<Category>('categories', [orderBy('name')]);
+  
+  // Conditionally load salesmen if admin
+  const { data: allSalesmen } = useAppData<UserProfile>('users', 
+    user?.role === 'admin' ? [where('role', '==', 'salesman')] : []
+  );
+
   const [selectedSalesmanId, setSelectedSalesmanId] = useState<string>('');
   const [salesmanInventory, setSalesmanInventory] = useState<Record<string, number>>({});
-  const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const [pdfLowStockOnly, setPdfLowStockOnly] = useState(false);
   const [filterBrand, setFilterBrand] = useState('');
   const [filterCategory, setFilterCategory] = useState('');
   const [isModalOpen, setModalOpen] = useState(false);
@@ -87,40 +94,6 @@ const Inventory: React.FC = () => {
   useEffect(() => {
     if (!user) return;
 
-    // Listen for global items
-    const q = query(collection(db, 'items'), orderBy('name'));
-    const unsubItems = onSnapshot(q, (snapshot) => {
-      const itemsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Item));
-      setItems(itemsData);
-      setLoading(false);
-    }, (error) => {
-      console.error("Inventory items listener error:", error);
-      setLoading(false);
-    });
-
-    // Listen for Brands
-    const unsubBrands = onSnapshot(query(collection(db, 'brands'), orderBy('name')), (snapshot) => {
-      setBrands(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Brand)));
-    });
-
-    // Listen for Categories
-    const unsubCategories = onSnapshot(query(collection(db, 'categories'), orderBy('name')), (snapshot) => {
-      setCategories(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Category)));
-    });
-
-    // Fetch all salesmen if admin
-    if (user.role === 'admin') {
-      const unsubUsers = onSnapshot(query(collection(db, 'users'), where('role', '==', 'salesman')), (snapshot) => {
-        setAllSalesmen(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as UserProfile)));
-      });
-      return () => {
-        unsubItems();
-        unsubBrands();
-        unsubCategories();
-        unsubUsers();
-      };
-    }
-
     // Listen for current user's inventory if they are a salesman
     let unsubSalesman: () => void = () => {};
     if (user.role === 'salesman') {
@@ -137,9 +110,6 @@ const Inventory: React.FC = () => {
     }
 
     return () => {
-      unsubItems();
-      unsubBrands();
-      unsubCategories();
       unsubSalesman();
     };
   }, [user]);
@@ -294,8 +264,17 @@ const Inventory: React.FC = () => {
   };
 
   const generateStockSummaryPDF = () => {
+    // Determine which items to include
+    let itemsToProcess = [...filteredItems];
+    if (pdfLowStockOnly) {
+      itemsToProcess = itemsToProcess.filter(item => {
+        const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
+        return stock <= (item.lowStockThreshold || 5);
+      });
+    }
+
     // Sort items: Group by Brand (A→Z), then by Name (A→Z) within brand
-    const sortedItems = [...items].sort((a, b) => {
+    const sortedItems = itemsToProcess.sort((a, b) => {
       const brandA = (a.brand || '-').toUpperCase();
       const brandB = (b.brand || '-').toUpperCase();
       const brandCompare = brandA.localeCompare(brandB);
@@ -348,7 +327,7 @@ const Inventory: React.FC = () => {
     doc.setLineWidth(1.5);
     doc.line(0, 35, pageWidth, 35);
 
-    // Stock Location
+    // Stock Location & Filter Status
     doc.setFontSize(10);
     doc.setTextColor(0, 0, 0); // Black text
     doc.setFont('helvetica', 'bold');
@@ -357,8 +336,28 @@ const Inventory: React.FC = () => {
     // Location Value in INDIGO Color
     doc.setTextColor(99, 102, 241);
     doc.setFont('helvetica', 'bold');
-    const location = selectedSalesmanId ? allSalesmen.find(s => s.id === selectedSalesmanId)?.name : 'MAIN STORE';
-    doc.text(String(location).toUpperCase(), 50, 44);
+    const locationBase = selectedSalesmanId ? (allSalesmen.find(s => s.id === selectedSalesmanId)?.name || 'SALESMAN') : 'MAIN STORE';
+    
+    // Determine Filter Status
+    let filterStatus = 'All Items';
+    if (pdfLowStockOnly) filterStatus = 'Low Stock Items Only';
+    else if (filterBrand) filterStatus = `Brand: ${filterBrand}`;
+    else if (filterCategory) filterStatus = `Category: ${filterCategory}`;
+    else if (searchTerm) filterStatus = `Results for "${searchTerm}"`;
+    
+    // Special check for "Low Stock" if not already explicitly forced
+    if (!pdfLowStockOnly) {
+      const isOnlyLowStock = sortedItems.length > 0 && sortedItems.every(item => {
+        const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
+        return stock <= (item.lowStockThreshold || 5);
+      });
+      if (isOnlyLowStock && sortedItems.length < items.length) {
+        filterStatus = 'Low Stock Items Only';
+      }
+    }
+
+    const fullLocationText = `${locationBase} — ${filterStatus}`;
+    doc.text(fullLocationText.toUpperCase(), 50, 44);
 
     // Thin divider line
     doc.setDrawColor(200, 200, 200);
@@ -530,7 +529,7 @@ const Inventory: React.FC = () => {
     });
   }, [items, searchTerm, fuse, user, salesmanInventory, selectedSalesmanId, filterBrand, filterCategory]);
 
-  if (loading) return <div>Loading inventory...</div>;
+  if (itemsLoading) return <div>Loading inventory...</div>;
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -546,6 +545,26 @@ const Inventory: React.FC = () => {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex bg-gray-100 p-1 rounded-lg border border-gray-200">
+            <button
+              onClick={() => setPdfLowStockOnly(false)}
+              className={cn(
+                "px-3 py-1 text-[10px] font-black uppercase rounded-md transition-all",
+                !pdfLowStockOnly ? "bg-white text-indigo-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+              )}
+            >
+              Full
+            </button>
+            <button
+              onClick={() => setPdfLowStockOnly(true)}
+              className={cn(
+                "px-3 py-1 text-[10px] font-black uppercase rounded-md transition-all",
+                pdfLowStockOnly ? "bg-white text-red-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+              )}
+            >
+              Low Stock
+            </button>
+          </div>
           <button 
             onClick={generateStockSummaryPDF}
             className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded text-xs font-bold hover:bg-indigo-700 transition-colors shadow-sm"
@@ -578,8 +597,16 @@ const Inventory: React.FC = () => {
             placeholder="Search anything — name, brand, even typos..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-11 pr-4 py-3 bg-white border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none transition-shadow shadow-sm text-sm"
+            className="w-full pl-11 pr-16 py-3 bg-white border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none transition-shadow shadow-sm text-sm"
           />
+          {searchTerm && (
+            <button
+              onClick={() => setSearchTerm('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
         <div className="flex flex-wrap gap-2 md:col-span-8 md:justify-end">
           {user?.role === 'admin' && (

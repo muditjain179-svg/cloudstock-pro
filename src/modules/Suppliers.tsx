@@ -12,25 +12,21 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { useAppData } from '../lib/useAppData';
 import { Supplier } from '../types';
 import { Plus, Search, Edit2, Trash2, Phone, X, UserPlus } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 const Suppliers: React.FC = () => {
   const { user } = useAuth();
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  
+  const { data: suppliers } = useAppData<Supplier>('suppliers', [orderBy('name')]);
+
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setModalOpen] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
   const [formData, setFormData] = useState({ name: '', phone: '' });
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  useEffect(() => {
-    const q = query(collection(db, 'suppliers'), orderBy('name'));
-    return onSnapshot(q, (snapshot) => {
-      setSuppliers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Supplier)));
-    });
-  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -12,27 +12,21 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { useAppData } from '../lib/useAppData';
 import { Brand } from '../types';
 import { Tag, Search, Edit2, Trash2, X, PlusCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 const Brands: React.FC = () => {
   const { user } = useAuth();
-  const [brands, setBrands] = useState<Brand[]>([]);
+  
+  const { data: brands } = useAppData<Brand>('brands', [orderBy('name')]);
+
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setModalOpen] = useState(false);
   const [editingBrand, setEditingBrand] = useState<Brand | null>(null);
   const [formData, setFormData] = useState({ name: '' });
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  useEffect(() => {
-    const q = query(collection(db, 'brands'), orderBy('name'));
-    return onSnapshot(q, (snapshot) => {
-      setBrands(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Brand)));
-    }, (error) => {
-      console.error("Brands listener error:", error);
-    });
-  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

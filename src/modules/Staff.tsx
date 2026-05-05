@@ -13,6 +13,7 @@ import { initializeApp, deleteApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { useAppData } from '../lib/useAppData';
 
 const firebaseConfig = {
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
@@ -44,23 +45,13 @@ import { cn } from '../lib/utils';
 
 const Staff: React.FC = () => {
   const { user: currentUser } = useAuth();
-  const [staff, setStaff] = useState<UserProfile[]>([]);
-  const [loading, setLoading] = useState(true);
+  
+  const { data: staff, isLoading: loading } = useAppData<UserProfile>('users');
+
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [newStaff, setNewStaff] = useState({ name: '', email: '', password: '', role: 'salesman' as const });
   const [createError, setCreateError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (currentUser?.role !== 'admin') return;
-
-    const unsub = onSnapshot(query(collection(db, 'users')), (snapshot) => {
-      setStaff(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as UserProfile)));
-      setLoading(false);
-    });
-
-    return () => unsub();
-  }, [currentUser]);
 
   const toggleRole = async (targetUser: UserProfile) => {
     if (targetUser.email === 'muditjain179@gmail.com') {

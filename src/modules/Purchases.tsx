@@ -6,16 +6,25 @@ import {
   updateDoc, 
   setDoc,
   doc, 
+  getDoc,
   query, 
   orderBy, 
   Timestamp,
   runTransaction,
+  writeBatch,
+  increment,
+  serverTimestamp,
   deleteDoc,
-  where
+  where,
+  limit,
+  startAfter,
+  getDocs,
+  DocumentSnapshot
 } from 'firebase/firestore';
 import Fuse from 'fuse.js';
 import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { useAppData } from '../lib/useAppData';
 import { Bill, Item, Supplier, BillItem, BillStatus } from '../types';
 import { 
   Plus, 
@@ -40,19 +49,20 @@ import { formatCurrency, generateInvoicePDF, generateWhatsAppLink, cn } from '..
 
 const Purchases: React.FC = () => {
   const { user } = useAuth();
+  
+  const { data: items } = useAppData<Item>('items', [orderBy('name')]);
+  const { data: suppliers } = useAppData<Supplier>('suppliers', [orderBy('name')]);
+
   const [bills, setBills] = useState<Bill[]>([]);
-  const [items, setItems] = useState<Item[]>([]);
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
 
-  // New UI States
   const [itemSearch, setItemSearch] = useState('');
   const [showItemSearch, setShowItemSearch] = useState(false);
   const [isSupplierModalOpen, setSupplierModalOpen] = useState(false);
   const [newSupplier, setNewSupplier] = useState({ name: '', phone: '' });
-
+  
   // Finalization Review
   const [showFinalizeOverlay, setShowFinalizeOverlay] = useState(false);
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
@@ -67,6 +77,9 @@ const Purchases: React.FC = () => {
 
   const [activeBills, setActiveBills] = useState<Bill[]>([]);
   const [draftBills, setDraftBills] = useState<Bill[]>([]);
+  const [lastVisibleActive, setLastVisibleActive] = useState<DocumentSnapshot | null>(null);
+  const [hasMoreActive, setHasMoreActive] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [currentTab, setCurrentTab] = useState<'active' | 'drafts'>('active');
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [viewingDraft, setViewingDraft] = useState<Bill | null>(null);
@@ -107,23 +120,41 @@ const Purchases: React.FC = () => {
     status: 'draft'
   });
 
-  const filteredSuppliers = suppliers.filter(s => 
-    s.name.toLowerCase().includes(supplierSearch.toLowerCase()) || 
-    (s.phone && s.phone.includes(supplierSearch))
-  );
+  const filteredSuppliers = useMemo(() => {
+    const q = supplierSearch.toLowerCase();
+    return suppliers.filter(s => 
+      s.name.toLowerCase().includes(q) || 
+      (s.phone && s.phone.includes(q))
+    );
+  }, [supplierSearch, suppliers]);
 
   useEffect(() => {
     if (user?.role !== 'admin') return;
 
-    // Listen for ACTIVE purchase bills
-    const activeQ = query(
+    loadInitialBills();
+
+    // Listen for NEW purchase bills
+    const now = Timestamp.now();
+    const newActiveQ = query(
       collection(db, 'bills'), 
       where('type', '==', 'purchase'), 
       where('status', '==', 'finalized'),
+      where('date', '>', now),
       orderBy('date', 'desc')
     );
-    const unsubActive = onSnapshot(activeQ, (snapshot) => {
-      setActiveBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
+    const unsubNew = onSnapshot(newActiveQ, (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === 'added') {
+          const newBill = { id: change.doc.id, ...change.doc.data() } as Bill;
+          setActiveBills(prev => {
+            if (prev.some(b => b.id === newBill.id)) return prev;
+            return [newBill, ...prev];
+          });
+        }
+        if (change.type === 'removed') {
+          setActiveBills(prev => prev.filter(b => b.id !== change.doc.id));
+        }
+      });
     });
 
     // Listen for DRAFT purchase bills
@@ -131,23 +162,64 @@ const Purchases: React.FC = () => {
       collection(db, 'bills'), 
       where('type', '==', 'purchase'), 
       where('status', '==', 'draft'),
-      orderBy('date', 'desc')
+      orderBy('date', 'desc'),
+      limit(50)
     );
     const unsubDrafts = onSnapshot(draftsQ, (snapshot) => {
       setDraftBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
     });
 
-    const unsubItems = onSnapshot(collection(db, 'items'), (snapshot) => {
-      setItems(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Item)));
-    });
-
-    const unsubSuppliers = onSnapshot(collection(db, 'suppliers'), (snapshot) => {
-      setSuppliers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Supplier)));
-    });
-
-    setLoading(false);
-    return () => { unsubActive(); unsubDrafts(); unsubItems(); unsubSuppliers(); };
+    return () => { unsubNew(); unsubDrafts(); };
   }, [user]);
+
+  const loadInitialBills = async () => {
+    if (!user) return;
+    setLoading(true);
+    try {
+      const q = query(
+        collection(db, 'bills'),
+        where('type', '==', 'purchase'),
+        where('status', '==', 'finalized'),
+        orderBy('date', 'desc'),
+        limit(50)
+      );
+
+      const snapshot = await getDocs(q);
+      const billsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill));
+      setActiveBills(billsData);
+      setLastVisibleActive(snapshot.docs[snapshot.docs.length - 1] || null);
+      setHasMoreActive(snapshot.docs.length === 50);
+    } catch (error) {
+      console.error("Error loading initial purchase bills:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadMoreBills = async () => {
+    if (!user || !lastVisibleActive || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const q = query(
+        collection(db, 'bills'),
+        where('type', '==', 'purchase'),
+        where('status', '==', 'finalized'),
+        orderBy('date', 'desc'),
+        startAfter(lastVisibleActive),
+        limit(50)
+      );
+
+      const snapshot = await getDocs(q);
+      const moreBills = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill));
+      setActiveBills(prev => [...prev, ...moreBills]);
+      setLastVisibleActive(snapshot.docs[snapshot.docs.length - 1] || null);
+      setHasMoreActive(snapshot.docs.length === 50);
+    } catch (error) {
+      console.error("Error loading more purchase bills:", error);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
 
   const calculateSubtotal = () => billData.items.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0);
   const calculateGrandTotal = () => calculateSubtotal() + Number(billData.oldDue || 0);
@@ -305,40 +377,50 @@ const Purchases: React.FC = () => {
     
     setIsSaving(true);
     try {
-      await runTransaction(db, async (transaction) => {
-        const updates: Array<{ ref: any, currentStock: number, currentOpeningBalance: number, qty: number }> = [];
+      const updates: Array<{ ref: any, currentStock: number, currentOpeningBalance: number, qty: number, price: number }> = [];
+      
+      for (const billItem of billToFinalize.items) {
+        const itemRef = doc(db, 'items', billItem.itemId);
+        const itemDoc = await getDoc(itemRef);
+        if (!itemDoc.exists()) throw new Error(`Item ${billItem.name} not found`);
         
-        for (const billItem of billToFinalize.items) {
-          const itemRef = doc(db, 'items', billItem.itemId);
-          const itemDoc = await transaction.get(itemRef);
-          if (!itemDoc.exists()) throw new Error(`Item ${billItem.name} not found`);
-          
-          const currentData = itemDoc.data();
-          updates.push({
-            ref: itemRef,
-            currentStock: currentData?.mainStock || 0,
-            currentOpeningBalance: currentData?.openingBalance || 0,
-            qty: billItem.quantity
+        const currentData = itemDoc.data();
+        updates.push({
+          ref: itemRef,
+          currentStock: currentData?.mainStock || 0,
+          currentOpeningBalance: currentData?.openingBalance || 0,
+          qty: billItem.quantity,
+          price: billItem.price
+        });
+      }
+
+      const batch = writeBatch(db);
+
+      for (const up of updates) {
+        if (up.currentStock === 0 || up.currentOpeningBalance === 0) {
+          batch.update(up.ref, { 
+            mainStock: increment(up.qty),
+            openingBalance: up.qty,
+            purchasePrice: up.price,
+            updatedAt: serverTimestamp()
+          });
+        } else {
+          batch.update(up.ref, { 
+            mainStock: increment(up.qty),
+            purchasePrice: up.price,
+            updatedAt: serverTimestamp()
           });
         }
+      }
 
-        for (const up of updates) {
-          if (up.currentStock === 0 || up.currentOpeningBalance === 0) {
-            transaction.update(up.ref, { 
-              mainStock: up.currentStock + up.qty,
-              openingBalance: up.qty 
-            });
-          } else {
-            transaction.update(up.ref, { mainStock: up.currentStock + up.qty });
-          }
-        }
-
-        const billRef = doc(db, 'bills', billToFinalize.id);
-        transaction.update(billRef, { 
-          status: 'finalized',
-          date: Timestamp.now()
-        });
+      const billRef = doc(db, 'bills', billToFinalize.id);
+      batch.update(billRef, { 
+        status: 'finalized',
+        date: Timestamp.now(),
+        updatedAt: serverTimestamp()
       });
+
+      await batch.commit();
 
       const finalBill = { ...billToFinalize, status: 'finalized' as BillStatus };
       setLastFinalizedBill(finalBill);
@@ -446,67 +528,83 @@ const Purchases: React.FC = () => {
 
     setIsSaving(true);
     try {
-      let createdBill: Bill | null = null;
-      await runTransaction(db, async (transaction) => {
-        if (status === 'finalized') {
-          const updates: Array<{ ref: any, currentStock: number, currentOpeningBalance: number, qty: number }> = [];
+      const updates: Array<{ ref: any, currentStock: number, currentOpeningBalance: number, qty: number, price: number }> = [];
+
+      if (status === 'finalized') {
+        for (const billItem of billData.items) {
+          const itemRef = doc(db, 'items', billItem.itemId);
+          const itemDoc = await getDoc(itemRef);
+          if (!itemDoc.exists()) throw new Error(`Item ${billItem.name} not found`);
           
-          // 1. All Reads
-          for (const billItem of billData.items) {
-            const itemRef = doc(db, 'items', billItem.itemId);
-            const itemDoc = await transaction.get(itemRef);
-            if (!itemDoc.exists()) throw new Error(`Item ${billItem.name} not found`);
-            
-            const currentData = itemDoc.data();
-            updates.push({
-              ref: itemRef,
-              currentStock: currentData?.mainStock || 0,
-              currentOpeningBalance: currentData?.openingBalance || 0,
-              qty: billItem.quantity
+          const currentData = itemDoc.data();
+          updates.push({
+            ref: itemRef,
+            currentStock: currentData?.mainStock || 0,
+            currentOpeningBalance: currentData?.openingBalance || 0,
+            qty: billItem.quantity,
+            price: billItem.price
+          });
+        }
+      }
+
+      const batch = writeBatch(db);
+
+      if (status === 'finalized') {
+        for (const up of updates) {
+          if (up.currentStock === 0 || up.currentOpeningBalance === 0) {
+            batch.update(up.ref, { 
+              mainStock: increment(up.qty),
+              openingBalance: up.qty,
+              purchasePrice: up.price,
+              updatedAt: serverTimestamp()
+            });
+          } else {
+            batch.update(up.ref, { 
+              mainStock: increment(up.qty),
+              purchasePrice: up.price,
+              updatedAt: serverTimestamp()
             });
           }
-
-          // 2. All Writes
-          for (const up of updates) {
-            if (up.currentStock === 0 || up.currentOpeningBalance === 0) {
-              transaction.update(up.ref, { 
-                mainStock: up.currentStock + up.qty,
-                openingBalance: up.qty 
-              });
-            } else {
-              transaction.update(up.ref, { mainStock: up.currentStock + up.qty });
-            }
-          }
         }
+      }
 
-        const selectedDate = new Date(billDate);
-        const now = new Date();
-        selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
+      const selectedDate = new Date(billDate);
+      const now = new Date();
+      selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
 
-        const newBillRef = editingDraftId ? doc(db, 'bills', editingDraftId) : doc(db, 'bills', crypto.randomUUID());
-        const newBillData: any = {
-          billNumber: editingDraftId ? (activeBills.find(b => b.id === editingDraftId)?.billNumber || draftBills.find(b => b.id === editingDraftId)?.billNumber) : `P-${Date.now().toString().slice(-6)}`,
-          type: 'purchase',
-          date: Timestamp.fromDate(selectedDate),
-          entityId: billData.supplier!.id,
-          entityName: billData.supplier!.name,
-          entityPhone: billData.supplier!.phone,
-          items: billData.items.map(i => ({
-            ...i,
-            quantity: Number(i.quantity),
-            price: Number(i.price)
-          })),
-          subtotal: calculateSubtotal(),
-          oldDue: Number(billData.oldDue || 0),
-          receivedAmount: Number(billData.receivedAmount || 0),
-          totalAmount: calculateGrandTotal(),
-          newBalance: calculateNewBalance(),
-          createdBy: user.id,
-          status
-        };
-        transaction.set(newBillRef, newBillData, { merge: true });
-        createdBill = { id: newBillRef.id, ...newBillData };
-      });
+      const billId = editingDraftId || crypto.randomUUID();
+      const newBillRef = doc(db, 'bills', billId);
+      const newBillData: any = {
+        billNumber: editingDraftId ? (activeBills.find(b => b.id === editingDraftId)?.billNumber || draftBills.find(b => b.id === editingDraftId)?.billNumber) : `P-${Date.now().toString().slice(-6)}`,
+        type: 'purchase',
+        date: Timestamp.fromDate(selectedDate),
+        entityId: billData.supplier!.id,
+        entityName: billData.supplier!.name,
+        entityPhone: billData.supplier!.phone,
+        items: billData.items.map(i => ({
+          ...i,
+          quantity: Number(i.quantity),
+          price: Number(i.price)
+        })),
+        subtotal: calculateSubtotal(),
+        oldDue: Number(billData.oldDue || 0),
+        receivedAmount: Number(billData.receivedAmount || 0),
+        totalAmount: calculateGrandTotal(),
+        newBalance: calculateNewBalance(),
+        createdBy: user.id,
+        status,
+        updatedAt: serverTimestamp()
+      };
+      
+      if (!editingDraftId) {
+        newBillData.createdAt = serverTimestamp();
+      }
+
+      batch.set(newBillRef, newBillData, { merge: true });
+      
+      await batch.commit();
+      
+      const createdBill = { id: newBillRef.id, ...newBillData } as any as Bill;
 
       if (status === 'finalized') {
         const blob = await generateInvoicePDF({
@@ -685,10 +783,18 @@ const Purchases: React.FC = () => {
                   <input
                     type="text"
                     placeholder="Search by name or phone..."
-                    className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none text-sm transition-all"
+                    className="w-full pl-10 pr-14 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none text-sm transition-all"
                     value={supplierSearch}
                     onChange={(e) => setSupplierSearch(e.target.value)}
                   />
+                  {supplierSearch && (
+                    <button
+                      onClick={() => setSupplierSearch('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
                 </div>
                 <div className="flex flex-col sm:flex-row gap-3">
                   <select 
@@ -788,11 +894,11 @@ const Purchases: React.FC = () => {
                           placeholder="Search by name, brand, category..."
                           value={itemSearch}
                           onChange={(e) => setItemSearch(e.target.value)}
-                          className="w-full pl-12 pr-12 py-4 bg-slate-50 border-2 border-indigo-100 rounded-2xl focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none text-sm font-bold placeholder:text-slate-400 transition-all uppercase tracking-tight"
+                          className="w-full pl-12 pr-16 py-4 bg-slate-50 border-2 border-indigo-100 rounded-2xl focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none text-sm font-bold placeholder:text-slate-400 transition-all uppercase tracking-tight"
                         />
                         <button 
                           onClick={() => { setShowItemSearch(false); setItemSearch(''); }}
-                          className="absolute right-4 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-200 rounded-full text-slate-400"
+                          className="absolute right-4 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-200 rounded-full text-slate-400 transition-colors"
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -1399,6 +1505,21 @@ const Purchases: React.FC = () => {
           {activeBills.length === 0 && (
             <div className="col-span-full py-12 text-center text-slate-400 text-sm font-bold uppercase tracking-widest">
                No finalized purchases found
+            </div>
+          )}
+          {hasMoreActive && (
+            <div className="col-span-full pt-6 flex justify-center">
+              <button 
+                onClick={loadMoreBills}
+                disabled={isLoadingMore}
+                className="px-8 py-3 bg-white border border-slate-200 text-slate-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-slate-50 transition-all active:scale-95 shadow-sm disabled:opacity-50 flex items-center gap-2"
+              >
+                {isLoadingMore ? (
+                  <div className="w-4 h-4 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  "Load More Purchases"
+                )}
+              </button>
             </div>
           )}
         </div>

@@ -12,27 +12,21 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { useAppData } from '../lib/useAppData';
 import { Category } from '../types';
 import { Layers, Search, Edit2, Trash2, X, PlusCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 const Categories: React.FC = () => {
   const { user } = useAuth();
-  const [categories, setCategories] = useState<Category[]>([]);
+  
+  const { data: categories } = useAppData<Category>('categories', [orderBy('name')]);
+
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
   const [formData, setFormData] = useState({ name: '' });
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  useEffect(() => {
-    const q = query(collection(db, 'categories'), orderBy('name'));
-    return onSnapshot(q, (snapshot) => {
-      setCategories(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Category)));
-    }, (error) => {
-      console.error("Categories listener error:", error);
-    });
-  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

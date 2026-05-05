@@ -6,16 +6,25 @@ import {
   updateDoc, 
   setDoc,
   doc, 
+  getDoc,
   query, 
   orderBy, 
   Timestamp,
   runTransaction,
+  writeBatch,
+  increment,
+  serverTimestamp,
   deleteDoc,
-  where
+  where,
+  limit,
+  startAfter,
+  getDocs,
+  DocumentSnapshot
 } from 'firebase/firestore';
 import Fuse from 'fuse.js';
 import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { useAppData } from '../lib/useAppData';
 import { Bill, Item, Customer, BillItem, BillStatus } from '../types';
 import { 
   Plus, 
@@ -40,9 +49,11 @@ import { formatCurrency, generateInvoicePDF, generateWhatsAppLink, cn } from '..
 
 const Sales: React.FC = () => {
   const { user } = useAuth();
+  
+  const { data: items } = useAppData<Item>('items', [orderBy('name')]);
+  const { data: customers } = useAppData<Customer>('customers', [orderBy('name')]);
+
   const [bills, setBills] = useState<Bill[]>([]);
-  const [items, setItems] = useState<Item[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
   const [salesmanInventory, setSalesmanInventory] = useState<Record<string, number>>({});
   const [isCreating, setIsCreating] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -77,6 +88,9 @@ const Sales: React.FC = () => {
   const [billDate, setBillDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [activeBills, setActiveBills] = useState<Bill[]>([]);
   const [draftBills, setDraftBills] = useState<Bill[]>([]);
+  const [lastVisibleActive, setLastVisibleActive] = useState<DocumentSnapshot | null>(null);
+  const [hasMoreActive, setHasMoreActive] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [currentTab, setCurrentTab] = useState<'active' | 'drafts'>('active');
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [viewingDraft, setViewingDraft] = useState<Bill | null>(null);
@@ -105,46 +119,57 @@ const Sales: React.FC = () => {
     return itemFuse.search(itemSearch).map(result => result.item);
   }, [itemSearch, itemFuse, inStockItems]);
 
-  const filteredCustomers = customers.filter(c => 
-    c.name.toLowerCase().includes(customerSearch.toLowerCase()) || 
-    (c.phone && c.phone.includes(customerSearch))
-  );
+  const filteredCustomers = useMemo(() => {
+    const q = customerSearch.toLowerCase();
+    return customers.filter(c => 
+      c.name.toLowerCase().includes(q) || 
+      (c.phone && c.phone.includes(q))
+    );
+  }, [customerSearch, customers]);
 
   useEffect(() => {
     if (!user) return;
 
-    // Listen for Finalized Bills
-    const activeBillsQ = user.role === 'admin'
-      ? query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'finalized'), orderBy('date', 'desc'))
-      : query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'finalized'), where('createdBy', '==', user.id), orderBy('date', 'desc'));
+    loadInitialBills();
 
-    const unsubActive = onSnapshot(activeBillsQ, (snapshot) => {
-      setActiveBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
-    }, (error) => {
-      console.error("Active bills listener error:", error);
+    // Listen for NEW bills only
+    const now = Timestamp.now();
+    let newBillsQ = query(
+      collection(db, 'bills'),
+      where('type', '==', 'sale'),
+      where('status', '==', 'finalized'),
+      where('date', '>', now),
+      orderBy('date', 'desc')
+    );
+
+    if (user.role === 'salesman') {
+      newBillsQ = query(newBillsQ, where('createdBy', '==', user.id));
+    }
+
+    const unsubNew = onSnapshot(newBillsQ, (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === 'added') {
+          const newBill = { id: change.doc.id, ...change.doc.data() } as Bill;
+          setActiveBills(prev => {
+            if (prev.some(b => b.id === newBill.id)) return prev;
+            return [newBill, ...prev];
+          });
+        }
+        if (change.type === 'removed') {
+          setActiveBills(prev => prev.filter(b => b.id !== change.doc.id));
+        }
+      });
     });
 
     // Listen for Draft Bills
     const draftsQ = user.role === 'admin'
-      ? query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'draft'), orderBy('date', 'desc'))
-      : query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'draft'), where('createdBy', '==', user.id), orderBy('date', 'desc'));
+      ? query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'draft'), orderBy('date', 'desc'), limit(50))
+      : query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'draft'), where('createdBy', '==', user.id), orderBy('date', 'desc'), limit(50));
 
     const unsubDrafts = onSnapshot(draftsQ, (snapshot) => {
       setDraftBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
     }, (error) => {
       console.error("Draft bills listener error:", error);
-    });
-
-    const unsubItems = onSnapshot(collection(db, 'items'), (snapshot) => {
-      setItems(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Item)));
-    }, (error) => {
-      console.error("Items listener error:", error);
-    });
-
-    const unsubCustomers = onSnapshot(collection(db, 'customers'), (snapshot) => {
-      setCustomers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Customer)));
-    }, (error) => {
-      console.error("Customers listener error:", error);
     });
 
     // Salesman inventory check
@@ -159,9 +184,65 @@ const Sales: React.FC = () => {
       });
     }
 
-    setLoading(false);
-    return () => { unsubActive(); unsubDrafts(); unsubItems(); unsubCustomers(); unsubInventory(); };
+    return () => { unsubNew(); unsubDrafts(); unsubInventory(); };
   }, [user]);
+
+  const loadInitialBills = async () => {
+    if (!user) return;
+    setLoading(true);
+    try {
+      let q = query(
+        collection(db, 'bills'),
+        where('type', '==', 'sale'),
+        where('status', '==', 'finalized'),
+        orderBy('date', 'desc'),
+        limit(50)
+      );
+
+      if (user.role === 'salesman') {
+        q = query(q, where('createdBy', '==', user.id));
+      }
+
+      const snapshot = await getDocs(q);
+      const billsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill));
+      setActiveBills(billsData);
+      setLastVisibleActive(snapshot.docs[snapshot.docs.length - 1] || null);
+      setHasMoreActive(snapshot.docs.length === 50);
+    } catch (error) {
+      console.error("Error loading initial bills:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadMoreBills = async () => {
+    if (!user || !lastVisibleActive || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      let q = query(
+        collection(db, 'bills'),
+        where('type', '==', 'sale'),
+        where('status', '==', 'finalized'),
+        orderBy('date', 'desc'),
+        startAfter(lastVisibleActive),
+        limit(50)
+      );
+
+      if (user.role === 'salesman') {
+        q = query(q, where('createdBy', '==', user.id));
+      }
+
+      const snapshot = await getDocs(q);
+      const moreBills = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill));
+      setActiveBills(prev => [...prev, ...moreBills]);
+      setLastVisibleActive(snapshot.docs[snapshot.docs.length - 1] || null);
+      setHasMoreActive(snapshot.docs.length === 50);
+    } catch (error) {
+      console.error("Error loading more bills:", error);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
 
   const calculateSubtotal = () => billData.items.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0);
   const calculateGrandTotal = () => calculateSubtotal() + Number(billData.oldDue || 0);
@@ -265,36 +346,42 @@ const Sales: React.FC = () => {
     
     setIsSaving(true);
     try {
-      await runTransaction(db, async (transaction) => {
-        const stockUpdates: Array<{ ref: any, currentQty: number, decrement: number }> = [];
-
-        // Part 7: Salesman Inventory Check
-        for (const billItem of billToFinalize.items) {
-          if (user.role === 'salesman') {
-            const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
-            const invDoc = await transaction.get(invRef);
-            const currentQty = invDoc.exists() ? invDoc.data().quantity : 0;
-            if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentQty}`);
-            stockUpdates.push({ ref: invRef, currentQty, decrement: billItem.quantity });
-          } else {
-            const itemRef = doc(db, 'items', billItem.itemId);
-            const itemDoc = await transaction.get(itemRef);
-            const currentStock = itemDoc.data()?.mainStock || 0;
-            if (currentStock < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentStock}`);
-            stockUpdates.push({ ref: itemRef, currentQty: currentStock, decrement: billItem.quantity });
-          }
+      // 1. Stock Check BEFORE Batch
+      for (const billItem of billToFinalize.items) {
+        if (user.role === 'salesman') {
+          const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
+          const invDoc = await getDoc(invRef);
+          const currentQty = invDoc.exists() ? invDoc.data().quantity : 0;
+          if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentQty}`);
+        } else {
+          const itemRef = doc(db, 'items', billItem.itemId);
+          const itemDoc = await getDoc(itemRef);
+          const currentStock = itemDoc.data()?.mainStock || 0;
+          if (currentStock < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentStock}`);
         }
+      }
 
-        for (const update of stockUpdates) {
-          transaction.update(update.ref, { quantity: update.currentQty - update.decrement });
+      const batch = writeBatch(db);
+
+      // 2. Perform Batch Operations
+      for (const billItem of billToFinalize.items) {
+        if (user.role === 'salesman') {
+          const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
+          batch.update(invRef, { quantity: increment(-billItem.quantity) });
+        } else {
+          const itemRef = doc(db, 'items', billItem.itemId);
+          batch.update(itemRef, { mainStock: increment(-billItem.quantity) });
         }
+      }
 
-        const billRef = doc(db, 'bills', billToFinalize.id);
-        transaction.update(billRef, { 
-          status: 'finalized',
-          date: Timestamp.now()
-        });
+      const billRef = doc(db, 'bills', billToFinalize.id);
+      batch.update(billRef, { 
+        status: 'finalized',
+        date: Timestamp.now(),
+        updatedAt: serverTimestamp()
       });
+
+      await batch.commit();
 
       const finalBill = { ...billToFinalize, status: 'finalized' as BillStatus };
       setLastFinalizedBill(finalBill);
@@ -405,76 +492,76 @@ const Sales: React.FC = () => {
 
     setIsSaving(true);
     try {
-      let createdBill: Bill | null = null;
-      await runTransaction(db, async (transaction) => {
-        const stockUpdates: Array<{ ref: any, currentQty: number, decrement: number }> = [];
-
-        if (status === 'finalized') {
-          for (const billItem of billData.items) {
-            if (user.role === 'salesman') {
-              const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
-              const invDoc = await transaction.get(invRef);
-              const currentQty = invDoc.exists() ? invDoc.data().quantity : 0;
-              if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentQty}`);
-              stockUpdates.push({ ref: invRef, currentQty, decrement: billItem.quantity });
-            } else {
-              const itemRef = doc(db, 'items', billItem.itemId);
-              const itemDoc = await transaction.get(itemRef);
-              const currentStock = itemDoc.data()?.mainStock || 0;
-              if (currentStock < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentStock}`);
-              stockUpdates.push({ ref: itemRef, currentQty: currentStock, decrement: billItem.quantity });
-            }
-          }
-        }
-
-        // Perform Writes after all Reads
-        for (const update of stockUpdates) {
+      if (status === 'finalized') {
+        for (const billItem of billData.items) {
           if (user.role === 'salesman') {
-            transaction.update(update.ref, { quantity: update.currentQty - update.decrement });
+            const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
+            const invDoc = await getDoc(invRef);
+            const currentQty = invDoc.exists() ? invDoc.data().quantity : 0;
+            if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentQty}`);
           } else {
-            transaction.update(update.ref, { mainStock: update.currentQty - update.decrement });
+            const itemRef = doc(db, 'items', billItem.itemId);
+            const itemDoc = await getDoc(itemRef);
+            const currentStock = itemDoc.data()?.mainStock || 0;
+            if (currentStock < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentStock}`);
           }
         }
+      }
 
-        const billId = editingDraftId || crypto.randomUUID();
-        const billRef = doc(db, 'bills', billId);
-        const subtotalValue = calculateSubtotal();
-        const grandTotalValue = calculateGrandTotal();
-        const newBalanceValue = calculateNewBalance();
+      const batch = writeBatch(db);
 
-        const selectedDate = new Date(billDate);
-        const now = new Date();
-        selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
-
-        const billPayload: any = {
-          billNumber: editingDraftId ? draftBills.find(d => d.id === editingDraftId)?.billNumber : `S-${Date.now().toString().slice(-6)}`,
-          type: 'sale',
-          date: Timestamp.fromDate(selectedDate),
-          entityId: billData.customer!.id,
-          entityName: billData.customer!.name,
-          entityPhone: billData.customer!.phone,
-          items: billData.items.map(i => ({
-            ...i,
-            quantity: Number(i.quantity),
-            price: Number(i.price)
-          })),
-          subtotal: subtotalValue,
-          oldDue: Number(billData.oldDue || 0),
-          totalAmount: grandTotalValue,
-          receivedAmount: Number(billData.receivedAmount || 0),
-          newBalance: newBalanceValue,
-          createdBy: user.id,
-          status
-        };
-        
-        if (editingDraftId) {
-          transaction.update(billRef, billPayload);
-        } else {
-          transaction.set(billRef, billPayload);
+      if (status === 'finalized') {
+        for (const billItem of billData.items) {
+          if (user.role === 'salesman') {
+            const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
+            batch.update(invRef, { quantity: increment(-billItem.quantity) });
+          } else {
+            const itemRef = doc(db, 'items', billItem.itemId);
+            batch.update(itemRef, { mainStock: increment(-billItem.quantity) });
+          }
         }
-        
-        createdBill = { id: billRef.id, ...billPayload } as Bill;
-      });
+      }
+
+      const billId = editingDraftId || crypto.randomUUID();
+      const billRef = doc(db, 'bills', billId);
+      const subtotalValue = calculateSubtotal();
+      const grandTotalValue = calculateGrandTotal();
+      const newBalanceValue = calculateNewBalance();
+
+      const selectedDate = new Date(billDate);
+      const now = new Date();
+      selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
+
+      const billPayload: any = {
+        billNumber: editingDraftId ? draftBills.find(d => d.id === editingDraftId)?.billNumber : `S-${Date.now().toString().slice(-6)}`,
+        type: 'sale',
+        date: Timestamp.fromDate(selectedDate),
+        entityId: billData.customer!.id,
+        entityName: billData.customer!.name,
+        entityPhone: billData.customer!.phone,
+        items: billData.items.map(i => ({
+          ...i,
+          quantity: Number(i.quantity),
+          price: Number(i.price)
+        })),
+        subtotal: subtotalValue,
+        oldDue: Number(billData.oldDue || 0),
+        totalAmount: grandTotalValue,
+        receivedAmount: Number(billData.receivedAmount || 0),
+        newBalance: newBalanceValue,
+        createdBy: user.id,
+        status,
+        updatedAt: serverTimestamp()
+      };
+      
+      if (!editingDraftId) {
+        billPayload.createdAt = serverTimestamp();
+      }
+      
+      batch.set(billRef, billPayload, { merge: true });
+      await batch.commit();
+
+      const createdBill = { id: billRef.id, ...billPayload } as any as Bill;
 
       if (status === 'finalized' && createdBill) {
         setLastFinalizedBill(createdBill);
@@ -693,10 +780,18 @@ const Sales: React.FC = () => {
                   <input
                     type="text"
                     placeholder="Search by name or phone..."
-                    className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none text-sm transition-all"
+                    className="w-full pl-10 pr-14 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none text-sm transition-all"
                     value={customerSearch}
                     onChange={(e) => setCustomerSearch(e.target.value)}
                   />
+                  {customerSearch && (
+                    <button
+                      onClick={() => setCustomerSearch('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
                 </div>
                 <div className="flex flex-col sm:flex-row gap-3">
                   <select 
@@ -797,11 +892,12 @@ const Sales: React.FC = () => {
                           placeholder="Search by name, brand, category..."
                           value={itemSearch}
                           onChange={(e) => setItemSearch(e.target.value)}
-                          className="w-full pl-12 pr-12 py-4 bg-slate-50 border-2 border-indigo-100 rounded-2xl focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none text-sm font-bold placeholder:text-slate-400 transition-all uppercase tracking-tight"
+                          className="w-full pl-12 pr-16 py-4 bg-slate-50 border-2 border-indigo-100 rounded-2xl focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none text-sm font-bold placeholder:text-slate-400 transition-all uppercase tracking-tight"
                         />
                         <button 
                           onClick={() => { setShowItemSearch(false); setItemSearch(''); }}
-                          className="absolute right-4 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-200 rounded-full text-slate-400"
+                          className="absolute right-4 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-200 rounded-full text-slate-400 transition-colors"
+                          title="Close search"
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -1293,6 +1389,21 @@ const Sales: React.FC = () => {
           {activeBills.length === 0 && (
             <div className="col-span-full py-12 text-center">
               <p className="text-slate-400 font-bold uppercase tracking-widest text-xs">No finalized bills found</p>
+            </div>
+          )}
+          {hasMoreActive && (
+            <div className="col-span-full pt-6 flex justify-center">
+              <button 
+                onClick={loadMoreBills}
+                disabled={isLoadingMore}
+                className="px-8 py-3 bg-white border border-slate-200 text-slate-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-slate-50 transition-all active:scale-95 shadow-sm disabled:opacity-50 flex items-center gap-2"
+              >
+                {isLoadingMore ? (
+                  <div className="w-4 h-4 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  "Load More Bills"
+                )}
+              </button>
             </div>
           )}
         </div>

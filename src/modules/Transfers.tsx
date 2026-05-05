@@ -7,7 +7,10 @@ import {
   orderBy, 
   Timestamp,
   runTransaction,
+  writeBatch,
+  increment,
   deleteDoc,
+  getDoc,
   getDocs,
   where,
   setDoc,
@@ -16,6 +19,7 @@ import {
 } from 'firebase/firestore';
 import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { useAppData } from '../lib/useAppData';
 import { Bill, Item, UserProfile, BillItem, Brand, Category } from '../types';
 import { 
   Plus, 
@@ -35,11 +39,13 @@ import { generateTransferPDF, generateWhatsAppLink, cn } from '../lib/utils';
 
 const Transfers: React.FC = () => {
   const { user } = useAuth();
+  
+  const { data: items } = useAppData<Item>('items', [orderBy('name')]);
+  const { data: salesmen } = useAppData<UserProfile>('users', [where('role', '==', 'salesman')]);
+  const { data: brands } = useAppData<Brand>('brands', [orderBy('name')]);
+  const { data: categories } = useAppData<Category>('categories', [orderBy('name')]);
+
   const [bills, setBills] = useState<Bill[]>([]);
-  const [items, setItems] = useState<Item[]>([]);
-  const [salesmen, setSalesmen] = useState<UserProfile[]>([]);
-  const [brands, setBrands] = useState<Brand[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [isOpeningStock, setIsOpeningStock] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -89,34 +95,8 @@ const Transfers: React.FC = () => {
       console.error("Transfers bills listener error:", error);
     });
 
-    const unsubItems = onSnapshot(collection(db, 'items'), (snapshot) => {
-      setItems(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Item)));
-    }, (error) => {
-      console.error("Items listener error:", error);
-    });
-
-    const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
-      setSalesmen(snapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() } as UserProfile))
-        .filter(u => u.role === 'salesman'));
-    }, (error) => {
-      console.error("Users listener error:", error);
-    });
-
-    const unsubBrands = onSnapshot(collection(db, 'brands'), (snapshot) => {
-      setBrands(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Brand)));
-    });
-
-    const unsubCategories = onSnapshot(collection(db, 'categories'), (snapshot) => {
-      setCategories(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Category)));
-    });
-
     return () => { 
       unsubBills(); 
-      unsubItems(); 
-      unsubUsers();
-      unsubBrands();
-      unsubCategories();
     };
   }, [user]);
 
@@ -177,92 +157,100 @@ const Transfers: React.FC = () => {
 
     setIsSaving(true);
     try {
-      let createdBill: Bill | null = null;
-      await runTransaction(db, async (transaction) => {
-        const itemUpdates: Array<{ ref: any, currentStock: number, qty: number }> = [];
-        const salesmanUpdates: Array<{ 
-          ref: any, 
-          currentStock: number, 
-          qty: number,
-          itemId?: string,
-          itemName?: string,
-          brand?: string
-        }> = [];
+      const itemUpdates: Array<{ ref: any, currentStock: number, qty: number }> = [];
+      const salesmanUpdates: Array<{ 
+        ref: any, 
+        currentStock: number, 
+        qty: number,
+        itemId?: string,
+        itemName?: string,
+        brand?: string
+      }> = [];
 
-        for (const billItem of billData.items) {
-          // 1. Decrease Main Stock (Only if NOT opening stock)
-          if (!isOpeningStock) {
-            const itemRef = doc(db, 'items', billItem.itemId);
-            const itemDoc = await transaction.get(itemRef);
-            const currentMainStock = itemDoc.data()?.mainStock || 0;
-            if (currentMainStock < billItem.quantity) throw new Error(`Insufficient main stock for ${billItem.name}`);
-            itemUpdates.push({ ref: itemRef, currentStock: currentMainStock, qty: billItem.quantity });
-          }
+      for (const billItem of billData.items) {
+        // 1. Decrease Main Stock (Only if NOT opening stock)
+        if (!isOpeningStock) {
+          const itemRef = doc(db, 'items', billItem.itemId);
+          const itemDoc = await getDoc(itemRef);
+          const currentMainStock = itemDoc.data()?.mainStock || 0;
+          if (currentMainStock < billItem.quantity) throw new Error(`Insufficient main stock for ${billItem.name}`);
+          itemUpdates.push({ ref: itemRef, currentStock: currentMainStock, qty: billItem.quantity });
+        }
 
-          // 2. Increase Salesman Stock
-          const salesmanInvRef = doc(db, `inventories/${billData.salesman!.id}/items`, billItem.itemId);
-          const salesmanInvDoc = await transaction.get(salesmanInvRef);
-          const currentSalesmanStock = salesmanInvDoc.exists() ? (salesmanInvDoc.data().quantity || 0) : 0;
-          
-          salesmanUpdates.push({ 
-            ref: salesmanInvRef, 
-            currentStock: currentSalesmanStock, 
-            qty: billItem.quantity,
-            itemId: billItem.itemId,
-            itemName: billItem.name,
-            brand: (billItem as any).brand
+        // 2. Increase Salesman Stock
+        const salesmanInvRef = doc(db, `inventories/${billData.salesman!.id}/items`, billItem.itemId);
+        const salesmanInvDoc = await getDoc(salesmanInvRef);
+        const currentSalesmanStock = salesmanInvDoc.exists() ? (salesmanInvDoc.data().quantity || 0) : 0;
+        
+        salesmanUpdates.push({ 
+          ref: salesmanInvRef, 
+          currentStock: currentSalesmanStock, 
+          qty: billItem.quantity,
+          itemId: billItem.itemId,
+          itemName: billItem.name,
+          brand: (billItem as any).brand
+        });
+      }
+
+      const batch = writeBatch(db);
+
+      // Writes
+      if (!isOpeningStock) {
+        for (const update of itemUpdates) {
+          batch.update(update.ref, { 
+            mainStock: increment(-update.qty),
+            updatedAt: serverTimestamp()
           });
         }
-
-        // Writes
-        if (!isOpeningStock) {
-          for (const update of itemUpdates) {
-            transaction.update(update.ref, { mainStock: update.currentStock - update.qty });
-          }
-        }
-        for (const update of salesmanUpdates) {
-          const payload: any = { 
-            quantity: update.currentStock + update.qty,
-            lastUpdated: Timestamp.now()
-          };
-          
-          if (isOpeningStock) {
-            payload.itemId = (update as any).itemId;
-            payload.itemName = (update as any).itemName;
-            payload.brand = (update as any).brand;
-            payload.openingStock = update.qty;
-            payload.addedAt = Timestamp.now();
-          }
-
-          transaction.set(update.ref, payload, { merge: true });
-        }
-
-        const newBillId = crypto.randomUUID();
-        const newBillRef = doc(db, 'bills', newBillId);
-
-        const selectedDate = new Date(billDate);
-        const now = new Date();
-        selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
-
-        const billPayload = {
-          billNumber: `${isOpeningStock ? 'OS' : 'T'}-${Date.now().toString().slice(-6)}`,
-          type: isOpeningStock ? 'opening_stock' as const : 'transfer' as const,
-          date: Timestamp.fromDate(selectedDate),
-          entityId: billData.salesman!.id,
-          entityName: billData.salesman!.name,
-          items: billData.items,
-          totalAmount: 0,
-          subtotal: 0,
-          oldDue: 0,
-          receivedAmount: 0,
-          newBalance: 0,
-          createdBy: user.id,
-          status: 'finalized' as const,
-          newItemCreated: billData.items.some(i => (i as any).newItemCreated)
+      }
+      for (const update of salesmanUpdates) {
+        const payload: any = { 
+          quantity: increment(update.qty),
+          lastUpdated: serverTimestamp()
         };
-        transaction.set(newBillRef, billPayload);
-        createdBill = { id: newBillRef.id, ...billPayload } as any as Bill;
-      });
+        
+        if (isOpeningStock) {
+          payload.itemId = (update as any).itemId;
+          payload.itemName = (update as any).itemName;
+          payload.brand = (update as any).brand;
+          payload.openingStock = increment(update.qty);
+          payload.addedAt = serverTimestamp();
+        }
+
+        batch.set(update.ref, payload, { merge: true });
+      }
+
+      const newBillId = crypto.randomUUID();
+      const newBillRef = doc(db, 'bills', newBillId);
+
+      const selectedDate = new Date(billDate);
+      const now = new Date();
+      selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
+
+      const billPayload = {
+        billNumber: `${isOpeningStock ? 'OS' : 'T'}-${Date.now().toString().slice(-6)}`,
+        type: isOpeningStock ? 'opening_stock' as const : 'transfer' as const,
+        date: Timestamp.fromDate(selectedDate),
+        entityId: billData.salesman!.id,
+        entityName: billData.salesman!.name,
+        items: billData.items,
+        totalAmount: 0,
+        subtotal: 0,
+        oldDue: 0,
+        receivedAmount: 0,
+        newBalance: 0,
+        createdBy: user.id,
+        status: 'finalized' as const,
+        newItemCreated: billData.items.some(i => (i as any).newItemCreated),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      };
+      
+      batch.set(newBillRef, billPayload);
+      
+      await batch.commit();
+      
+      const createdBill = { id: newBillRef.id, ...billPayload } as any as Bill;
 
       if (createdBill) {
         setLastFinalizedBill(createdBill);
