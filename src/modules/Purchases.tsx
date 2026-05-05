@@ -57,6 +57,7 @@ const Purchases: React.FC = () => {
   const [isCreating, setIsCreating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
 
   const [itemSearch, setItemSearch] = useState('');
   const [showItemSearch, setShowItemSearch] = useState(false);
@@ -68,6 +69,7 @@ const Purchases: React.FC = () => {
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [lastFinalizedBill, setLastFinalizedBill] = useState<Bill | null>(null);
   const [supplierSearch, setSupplierSearch] = useState('');
+  const [showRecoveryBanner, setShowRecoveryBanner] = useState(false);
   const [billDate, setBillDate] = useState<string>(new Date().toISOString().split('T')[0]);
 
   // Quick Add Item States
@@ -172,6 +174,129 @@ const Purchases: React.FC = () => {
     return () => { unsubNew(); unsubDrafts(); };
   }, [user]);
 
+  const ITEM_DOC_TIMEOUT = 10000;
+  const GLOBAL_SUBMISSION_TIMEOUT = 30000;
+
+  const checkDocWithTimeout = async (ref: any) => {
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Stock check for item timed out. Path: ${ref.path}`)), ITEM_DOC_TIMEOUT)
+    );
+    return Promise.race([getDoc(ref), timeout]) as Promise<DocumentSnapshot>;
+  };
+
+  const handleAsyncAction = async (action: () => Promise<void>, actionName: string) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSubmissionError(null);
+
+    const safetyTimer = setTimeout(() => {
+      setIsSaving(false);
+      setSubmissionError(`The ${actionName} operation timed out. Please check your connection and try again.`);
+      alert(`The ${actionName} operation timed out. Please check your connection and try again.`);
+    }, GLOBAL_SUBMISSION_TIMEOUT);
+
+    try {
+      await action();
+    } catch (error: any) {
+      console.error(`Error during ${actionName}:`, error);
+      let message = error.message || `An error occurred during ${actionName}`;
+      if (error.code === 'unavailable') {
+        message = 'No internet connection. Please check your network and try again.';
+      } else if (error.code === 'permission-denied') {
+        message = 'Permission denied. Please contact your admin.';
+      } else if (message.includes('timed out')) {
+        message = 'Request timed out. Please try again.';
+      }
+      setSubmissionError(message);
+      alert(message);
+    } finally {
+      clearTimeout(safetyTimer);
+      setIsSaving(false);
+    }
+  };
+
+  // Auto-restore form state
+  useEffect(() => {
+    const saved = localStorage.getItem('draft_purchase_bill');
+    if (!saved) return;
+
+    try {
+      const formState = JSON.parse(saved);
+      const age = Date.now() - formState.savedAt;
+      
+      // Only restore if saved less than 24 hours ago
+      if (age > 24 * 60 * 60 * 1000) {
+        localStorage.removeItem('draft_purchase_bill');
+        return;
+      }
+
+      if (formState.items?.length > 0 || formState.supplier) {
+        // Verify items and supplier still exist
+        const validatedItems = formState.items.filter((bi: BillItem) => 
+          items.find(i => i.id === bi.itemId)
+        );
+        
+        if (validatedItems.length < formState.items.length) {
+          alert("Some items were removed from your restored bill as they no longer exist in inventory.");
+        }
+
+        const validatedSupplier = formState.supplier && suppliers.find(s => s.id === formState.supplier.id) 
+          ? formState.supplier 
+          : null;
+        
+        if (formState.supplier && !validatedSupplier) {
+          alert("Previously selected supplier no longer exists. Please select again.");
+        }
+
+        setBillData(prev => ({
+          ...prev,
+          items: validatedItems,
+          supplier: validatedSupplier,
+          oldDue: formState.oldDue ?? '',
+          receivedAmount: formState.receivedAmount ?? ''
+        }));
+        setBillDate(formState.billDate || new Date().toISOString().split('T')[0]);
+        setShowRecoveryBanner(true);
+        setIsCreating(true);
+      }
+    } catch (e) {
+      console.error("Error restoring purchase draft:", e);
+      localStorage.removeItem('draft_purchase_bill');
+    }
+  }, [items, suppliers]);
+
+  // Auto-save form state
+  useEffect(() => {
+    if (!isCreating || isSaving || (billData.items.length === 0 && !billData.supplier)) return;
+
+    const timeoutId = setTimeout(() => {
+      try {
+        const formState = {
+          items: billData.items,
+          supplier: billData.supplier,
+          oldDue: billData.oldDue,
+          receivedAmount: billData.receivedAmount,
+          billDate,
+          savedAt: Date.now()
+        };
+        localStorage.setItem('draft_purchase_bill', JSON.stringify(formState));
+      } catch (e) {
+        console.warn("Failed to auto-save purchase draft:", e);
+      }
+    }, 1000);
+
+    return () => clearTimeout(timeoutId);
+  }, [billData.items, billData.supplier, billData.oldDue, billData.receivedAmount, billDate, isCreating]);
+
+  const resetForm = () => {
+    setBillData({ supplier: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
+    setBillDate(new Date().toISOString().split('T')[0]);
+    setIsCreating(false);
+    setEditingDraftId(null);
+    setShowRecoveryBanner(false);
+    localStorage.removeItem('draft_purchase_bill');
+  };
+
   const loadInitialBills = async () => {
     if (!user) return;
     setLoading(true);
@@ -251,9 +376,7 @@ const Purchases: React.FC = () => {
 
   const handleAddSupplier = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSaving) return;
-    setIsSaving(true);
-    try {
+    handleAsyncAction(async () => {
       const supplierId = crypto.randomUUID();
       const supplierRef = doc(db, 'suppliers', supplierId);
       await setDoc(supplierRef, newSupplier);
@@ -261,16 +384,11 @@ const Purchases: React.FC = () => {
       setBillData({ ...billData, supplier: s });
       setSupplierModalOpen(false);
       setNewSupplier({ name: '', phone: '' });
-    } catch (error) {
-      alert("Error adding supplier");
-    } finally {
-      setIsSaving(false);
-    }
+    }, "adding supplier");
   };
 
   const handleQuickAddItem = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSaving) return;
 
     const newErrors: any = {};
     if (!quickAddForm.name.trim()) newErrors.name = 'Item name is required';
@@ -286,8 +404,7 @@ const Purchases: React.FC = () => {
     setQuickAddErrors(newErrors);
     if (Object.keys(newErrors).length > 0) return;
 
-    setIsSaving(true);
-    try {
+    handleAsyncAction(async () => {
       const itemId = crypto.randomUUID();
       const newItem: any = {
         name: quickAddForm.name.trim(),
@@ -312,11 +429,7 @@ const Purchases: React.FC = () => {
       setItemSearch('');
       setShowItemSearch(false);
       alert("Item added! Now enter quantity and price.");
-    } catch (error) {
-      alert("Error adding item");
-    } finally {
-      setIsSaving(false);
-    }
+    }, "adding quick item");
   };
 
   const handleDownloadBill = async (bill: Bill) => {
@@ -373,15 +486,12 @@ const Purchases: React.FC = () => {
   };
 
   const handleFinalizeBill = async (billToFinalize: Bill) => {
-    if (!user || isSaving) return;
-    
-    setIsSaving(true);
-    try {
+    handleAsyncAction(async () => {
       const updates: Array<{ ref: any, currentStock: number, currentOpeningBalance: number, qty: number, price: number }> = [];
       
       for (const billItem of billToFinalize.items) {
         const itemRef = doc(db, 'items', billItem.itemId);
-        const itemDoc = await getDoc(itemRef);
+        const itemDoc = await checkDocWithTimeout(itemRef);
         if (!itemDoc.exists()) throw new Error(`Item ${billItem.name} not found`);
         
         const currentData = itemDoc.data();
@@ -453,11 +563,7 @@ const Purchases: React.FC = () => {
       setPdfPreviewUrl(URL.createObjectURL(blob));
       setShowFinalizeOverlay(true);
       setIsFinalizing(null);
-    } catch (error: any) {
-      alert(error.message || "Error finalizing bill");
-    } finally {
-      setIsSaving(false);
-    }
+    }, "finalizing bill");
   };
 
   const handleSaveBill = async (status: 'draft' | 'finalized') => {
@@ -488,8 +594,7 @@ const Purchases: React.FC = () => {
 
     // Show preview first if finalizing
     if (status === 'finalized' && !showFinalizeOverlay) {
-      setIsSaving(true);
-      try {
+      handleAsyncAction(async () => {
         const blob = await generateInvoicePDF({
           title: 'PURCHASE BILL',
           themeColor: '#2563eb', // Blue theme
@@ -520,20 +625,17 @@ const Purchases: React.FC = () => {
         const url = URL.createObjectURL(blob);
         setPdfPreviewUrl(url);
         setShowFinalizeOverlay(true);
-      } finally {
-        setIsSaving(false);
-      }
+      }, "generating preview");
       return;
     }
 
-    setIsSaving(true);
-    try {
+    handleAsyncAction(async () => {
       const updates: Array<{ ref: any, currentStock: number, currentOpeningBalance: number, qty: number, price: number }> = [];
 
       if (status === 'finalized') {
         for (const billItem of billData.items) {
           const itemRef = doc(db, 'items', billItem.itemId);
-          const itemDoc = await getDoc(itemRef);
+          const itemDoc = await checkDocWithTimeout(itemRef);
           if (!itemDoc.exists()) throw new Error(`Item ${billItem.name} not found`);
           
           const currentData = itemDoc.data();
@@ -637,12 +739,9 @@ const Purchases: React.FC = () => {
         setEditingDraftId(null);
         setBillData({ supplier: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
         setBillDate(new Date().toISOString().split('T')[0]);
+        resetForm();
       }
-    } catch (error: any) {
-      alert(error.message || "Error saving purchase");
-    } finally {
-      setIsSaving(false);
-    }
+    }, `saving bill as ${status}`);
   };
 
   const shareBillOnWhatsApp = async (bill: Bill) => {
@@ -696,7 +795,7 @@ const Purchases: React.FC = () => {
     const confirmed = window.confirm(`Are you sure you want to delete purchase bill #${bill.billNumber}? Items will be removed from main stock.`);
     if (!confirmed) return;
 
-    try {
+    handleAsyncAction(async () => {
       await runTransaction(db, async (transaction) => {
         const billRef = doc(db, 'bills', bill.id);
         const billDoc = await transaction.get(billRef);
@@ -725,9 +824,7 @@ const Purchases: React.FC = () => {
         }
         transaction.delete(billRef);
       });
-    } catch (error: any) {
-      handleFirestoreError(error, 'delete', `bills/${bill.id}`);
-    }
+    }, "deleting bill");
   };
 
   if (user?.role !== 'admin') return <div className="p-8 text-center text-rose-500 font-bold">Access Denied</div>;
@@ -737,12 +834,7 @@ const Purchases: React.FC = () => {
       <div className="space-y-6">
         <div className="flex items-center gap-4">
           <button 
-            onClick={() => {
-              setIsCreating(false);
-              setEditingDraftId(null);
-              setBillData({ supplier: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
-              setBillDate(new Date().toISOString().split('T')[0]);
-            }} 
+            onClick={resetForm} 
             className="flex items-center gap-2 px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-slate-200 transition-all active:scale-95 shadow-sm"
           >
             <ChevronRight className="w-4 h-4 rotate-180" />
@@ -750,6 +842,29 @@ const Purchases: React.FC = () => {
           </button>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{editingDraftId ? 'Edit Draft Bill' : 'New Purchase Bill'}</h1>
         </div>
+
+        {showRecoveryBanner && (
+          <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 animate-in slide-in-from-top-2 duration-300">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center">
+                <Save className="w-4 h-4 text-amber-600" />
+              </div>
+              <div>
+                <p className="text-amber-900 text-sm font-bold tracking-tight">Order Restored</p>
+                <p className="text-amber-700 text-xs font-medium">We found and recovered your unsaved purchase data.</p>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                resetForm();
+                setShowRecoveryBanner(false);
+              }}
+              className="px-4 py-2 bg-amber-600/10 text-amber-700 text-xs font-bold rounded-lg hover:bg-amber-600/20 transition-colors uppercase tracking-wider"
+            >
+              Discard
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">
@@ -1381,13 +1496,7 @@ const Purchases: React.FC = () => {
                         Open Full Preview
                       </button>
                       <button 
-                        onClick={() => {
-                          setShowFinalizeOverlay(false);
-                          setIsCreating(false);
-                          setLastFinalizedBill(null);
-                          setPdfPreviewUrl(null);
-                          setBillData({ supplier: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
-                        }}
+                        onClick={resetForm}
                         className="w-full py-4 bg-slate-900 text-white font-black rounded-2xl hover:bg-black transition-all uppercase tracking-widest text-[10px] sm:text-xs shadow-xl"
                       >
                         Finish & New Entry

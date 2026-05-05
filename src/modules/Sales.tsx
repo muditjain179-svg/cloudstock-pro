@@ -58,6 +58,7 @@ const Sales: React.FC = () => {
   const [isCreating, setIsCreating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [itemSearch, setItemSearch] = useState('');
   const [showItemSearch, setShowItemSearch] = useState(false);
   const [isCustomerModalOpen, setCustomerModalOpen] = useState(false);
@@ -68,8 +69,8 @@ const Sales: React.FC = () => {
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [lastFinalizedBill, setLastFinalizedBill] = useState<Bill | null>(null);
   const [customerSearch, setCustomerSearch] = useState('');
+  const [showRecoveryBanner, setShowRecoveryBanner] = useState(false);
 
-  // Bill Form State
   // Bill Form State
   const [billData, setBillData] = useState<{
     customer: Customer | null;
@@ -186,6 +187,129 @@ const Sales: React.FC = () => {
 
     return () => { unsubNew(); unsubDrafts(); unsubInventory(); };
   }, [user]);
+
+  const ITEM_DOC_TIMEOUT = 10000;
+  const GLOBAL_SUBMISSION_TIMEOUT = 30000;
+
+  const checkDocWithTimeout = async (ref: any) => {
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Stock check for item timed out. Path: ${ref.path}`)), ITEM_DOC_TIMEOUT)
+    );
+    return Promise.race([getDoc(ref), timeout]) as Promise<DocumentSnapshot>;
+  };
+
+  const handleAsyncAction = async (action: () => Promise<void>, actionName: string) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSubmissionError(null);
+
+    const safetyTimer = setTimeout(() => {
+      setIsSaving(false);
+      setSubmissionError(`The ${actionName} operation timed out. Please check your connection and try again.`);
+      alert(`The ${actionName} operation timed out. Please check your connection and try again.`);
+    }, GLOBAL_SUBMISSION_TIMEOUT);
+
+    try {
+      await action();
+    } catch (error: any) {
+      console.error(`Error during ${actionName}:`, error);
+      let message = error.message || `An error occurred during ${actionName}`;
+      if (error.code === 'unavailable') {
+        message = 'No internet connection. Please check your network and try again.';
+      } else if (error.code === 'permission-denied') {
+        message = 'Permission denied. Please contact your admin.';
+      } else if (message.includes('timed out')) {
+        message = 'Request timed out. Please try again.';
+      }
+      setSubmissionError(message);
+      alert(message);
+    } finally {
+      clearTimeout(safetyTimer);
+      setIsSaving(false);
+    }
+  };
+
+  // Auto-restore form state
+  useEffect(() => {
+    const saved = localStorage.getItem('draft_sales_bill');
+    if (!saved) return;
+
+    try {
+      const formState = JSON.parse(saved);
+      const age = Date.now() - formState.savedAt;
+      
+      // Only restore if saved less than 24 hours ago
+      if (age > 24 * 60 * 60 * 1000) {
+        localStorage.removeItem('draft_sales_bill');
+        return;
+      }
+
+      if (formState.items?.length > 0 || formState.customer) {
+        // Verify items and customer still exist
+        const validatedItems = formState.items.filter((bi: BillItem) => 
+          items.find(i => i.id === bi.itemId)
+        );
+        
+        if (validatedItems.length < formState.items.length) {
+          alert("Some items were removed from your restored bill as they no longer exist in inventory.");
+        }
+
+        const validatedCustomer = formState.customer && customers.find(c => c.id === formState.customer.id) 
+          ? formState.customer 
+          : null;
+        
+        if (formState.customer && !validatedCustomer) {
+          alert("Previously selected customer no longer exists. Please select again.");
+        }
+
+        setBillData(prev => ({
+          ...prev,
+          items: validatedItems,
+          customer: validatedCustomer,
+          oldDue: formState.oldDue ?? '',
+          receivedAmount: formState.receivedAmount ?? ''
+        }));
+        setBillDate(formState.billDate || new Date().toISOString().split('T')[0]);
+        setShowRecoveryBanner(true);
+        setIsCreating(true);
+      }
+    } catch (e) {
+      console.error("Error restoring sales draft:", e);
+      localStorage.removeItem('draft_sales_bill');
+    }
+  }, [items, customers]);
+
+  // Auto-save form state
+  useEffect(() => {
+    if (!isCreating || isSaving || (billData.items.length === 0 && !billData.customer)) return;
+
+    const timeoutId = setTimeout(() => {
+      try {
+        const formState = {
+          items: billData.items,
+          customer: billData.customer,
+          oldDue: billData.oldDue,
+          receivedAmount: billData.receivedAmount,
+          billDate,
+          savedAt: Date.now()
+        };
+        localStorage.setItem('draft_sales_bill', JSON.stringify(formState));
+      } catch (e) {
+        console.warn("Failed to auto-save sales draft:", e);
+      }
+    }, 1000); // Debounce saves to once per second
+
+    return () => clearTimeout(timeoutId);
+  }, [billData.items, billData.customer, billData.oldDue, billData.receivedAmount, billDate, isCreating]);
+
+  const resetForm = () => {
+    setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
+    setBillDate(new Date().toISOString().split('T')[0]);
+    setIsCreating(false);
+    setEditingDraftId(null);
+    setShowRecoveryBanner(false);
+    localStorage.removeItem('draft_sales_bill');
+  };
 
   const loadInitialBills = async () => {
     if (!user) return;
@@ -342,20 +466,17 @@ const Sales: React.FC = () => {
   };
 
   const handleFinalizeBill = async (billToFinalize: Bill) => {
-    if (!user || isSaving) return;
-    
-    setIsSaving(true);
-    try {
+    handleAsyncAction(async () => {
       // 1. Stock Check BEFORE Batch
       for (const billItem of billToFinalize.items) {
-        if (user.role === 'salesman') {
-          const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
-          const invDoc = await getDoc(invRef);
-          const currentQty = invDoc.exists() ? invDoc.data().quantity : 0;
+        if (user!.role === 'salesman') {
+          const invRef = doc(db, `inventories/${user!.id}/items`, billItem.itemId);
+          const invDoc = await checkDocWithTimeout(invRef);
+          const currentQty = invDoc.exists() ? invDoc.data()?.quantity : 0;
           if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentQty}`);
         } else {
           const itemRef = doc(db, 'items', billItem.itemId);
-          const itemDoc = await getDoc(itemRef);
+          const itemDoc = await checkDocWithTimeout(itemRef);
           const currentStock = itemDoc.data()?.mainStock || 0;
           if (currentStock < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentStock}`);
         }
@@ -365,8 +486,8 @@ const Sales: React.FC = () => {
 
       // 2. Perform Batch Operations
       for (const billItem of billToFinalize.items) {
-        if (user.role === 'salesman') {
-          const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
+        if (user!.role === 'salesman') {
+          const invRef = doc(db, `inventories/${user!.id}/items`, billItem.itemId);
           batch.update(invRef, { quantity: increment(-billItem.quantity) });
         } else {
           const itemRef = doc(db, 'items', billItem.itemId);
@@ -414,11 +535,7 @@ const Sales: React.FC = () => {
       setPdfPreviewUrl(URL.createObjectURL(blob));
       setShowFinalizeOverlay(true);
       setIsFinalizing(null);
-    } catch (error: any) {
-      alert(error.message || "Error finalizing bill");
-    } finally {
-      setIsSaving(false);
-    }
+    }, "finalizing bill");
   };
 
   const handleSaveBill = async (status: 'draft' | 'finalized') => {
@@ -448,8 +565,7 @@ const Sales: React.FC = () => {
     }
 
     if (status === 'finalized' && !showFinalizeOverlay) {
-      setIsSaving(true);
-      try {
+      handleAsyncAction(async () => {
         const subtotal = calculateSubtotal();
         const grandTotal = calculateGrandTotal();
         const newBalance = calculateNewBalance();
@@ -484,24 +600,21 @@ const Sales: React.FC = () => {
         const url = URL.createObjectURL(blob);
         setPdfPreviewUrl(url);
         setShowFinalizeOverlay(true);
-      } finally {
-        setIsSaving(false);
-      }
+      }, "generating preview");
       return;
     }
 
-    setIsSaving(true);
-    try {
+    handleAsyncAction(async () => {
       if (status === 'finalized') {
         for (const billItem of billData.items) {
-          if (user.role === 'salesman') {
-            const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
-            const invDoc = await getDoc(invRef);
-            const currentQty = invDoc.exists() ? invDoc.data().quantity : 0;
+          if (user!.role === 'salesman') {
+            const invRef = doc(db, `inventories/${user!.id}/items`, billItem.itemId);
+            const invDoc = await checkDocWithTimeout(invRef);
+            const currentQty = invDoc.exists() ? invDoc.data()?.quantity : 0;
             if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentQty}`);
           } else {
             const itemRef = doc(db, 'items', billItem.itemId);
-            const itemDoc = await getDoc(itemRef);
+            const itemDoc = await checkDocWithTimeout(itemRef);
             const currentStock = itemDoc.data()?.mainStock || 0;
             if (currentStock < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentStock}`);
           }
@@ -512,8 +625,8 @@ const Sales: React.FC = () => {
 
       if (status === 'finalized') {
         for (const billItem of billData.items) {
-          if (user.role === 'salesman') {
-            const invRef = doc(db, `inventories/${user.id}/items`, billItem.itemId);
+          if (user!.role === 'salesman') {
+            const invRef = doc(db, `inventories/${user!.id}/items`, billItem.itemId);
             batch.update(invRef, { quantity: increment(-billItem.quantity) });
           } else {
             const itemRef = doc(db, 'items', billItem.itemId);
@@ -549,7 +662,7 @@ const Sales: React.FC = () => {
         totalAmount: grandTotalValue,
         receivedAmount: Number(billData.receivedAmount || 0),
         newBalance: newBalanceValue,
-        createdBy: user.id,
+        createdBy: user!.id,
         status,
         updatedAt: serverTimestamp()
       };
@@ -598,20 +711,15 @@ const Sales: React.FC = () => {
         setEditingDraftId(null);
         setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
         setBillDate(new Date().toISOString().split('T')[0]);
+        resetForm();
         if (editingDraftId) alert("Draft saved successfully");
       }
-    } catch (error: any) {
-      alert(error.message || "Error saving bill");
-    } finally {
-      setIsSaving(false);
-    }
+    }, `saving bill as ${status}`);
   };
 
   const handleAddCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSaving) return;
-    setIsSaving(true);
-    try {
+    handleAsyncAction(async () => {
       const customerId = crypto.randomUUID();
       const customerRef = doc(db, 'customers', customerId);
       await setDoc(customerRef, newCustomer);
@@ -619,11 +727,7 @@ const Sales: React.FC = () => {
       setBillData({ ...billData, customer: created });
       setCustomerModalOpen(false);
       setNewCustomer({ name: '', phone: '' });
-    } catch (error) {
-      console.error("Error adding customer:", error);
-    } finally {
-      setIsSaving(false);
-    }
+    }, "adding customer");
   };
 
   const shareBillOnWhatsApp = async (bill: Bill) => {
@@ -683,32 +787,32 @@ const Sales: React.FC = () => {
     const confirmed = window.confirm(`Are you sure you want to delete bill #${bill.billNumber}? Stock will be returned to inventory.`);
     if (!confirmed) return;
 
-    try {
+    handleAsyncAction(async () => {
       await runTransaction(db, async (transaction) => {
         const billRef = doc(db, 'bills', bill.id);
         const billDoc = await transaction.get(billRef);
         if (!billDoc.exists()) throw new Error("Bill not found");
         const bData = billDoc.data() as Bill;
 
-        const stockUpdates: Array<{ ref: any, currentQty: number, increment: number, type: 'salesman' | 'main' }> = [];
+        const stockUpdates: Array<{ ref: any, currentQty: number, incrementNum: number, type: 'salesman' | 'main' }> = [];
 
         if (bData.status === 'finalized') {
           // Determine creator role to know where to return stock
           const userRef = doc(db, 'users', bData.createdBy);
           const userDoc = await transaction.get(userRef);
-          const creatorRole = userDoc.exists() ? userDoc.data().role : 'salesman';
+          const creatorRole = userDoc.exists() ? userDoc.data()?.role : 'salesman';
 
           for (const billItem of bData.items) {
             if (creatorRole === 'salesman') {
               const invRef = doc(db, `inventories/${bData.createdBy}/items`, billItem.itemId);
               const invDoc = await transaction.get(invRef);
-              const currentQty = invDoc.exists() ? invDoc.data().quantity : 0;
-              stockUpdates.push({ ref: invRef, currentQty, increment: billItem.quantity, type: 'salesman' });
+              const currentQty = invDoc.exists() ? invDoc.data()?.quantity : 0;
+              stockUpdates.push({ ref: invRef, currentQty, incrementNum: billItem.quantity, type: 'salesman' });
             } else {
               const itemRef = doc(db, 'items', billItem.itemId);
               const itemDoc = await transaction.get(itemRef);
               const currentStock = itemDoc.data()?.mainStock || 0;
-              stockUpdates.push({ ref: itemRef, currentQty: currentStock, increment: billItem.quantity, type: 'main' });
+              stockUpdates.push({ ref: itemRef, currentQty: currentStock, incrementNum: billItem.quantity, type: 'main' });
             }
           }
         }
@@ -716,16 +820,21 @@ const Sales: React.FC = () => {
         // Writes
         for (const update of stockUpdates) {
           if (update.type === 'salesman') {
-            transaction.update(update.ref, { quantity: update.currentQty + update.increment });
+            transaction.update(update.ref, { 
+              quantity: update.currentQty + update.incrementNum,
+              lastUpdated: serverTimestamp()
+            });
           } else {
-            transaction.update(update.ref, { mainStock: update.currentQty + update.increment });
+            transaction.update(update.ref, { 
+              mainStock: update.currentQty + update.incrementNum,
+              updatedAt: serverTimestamp()
+            });
           }
         }
+
         transaction.delete(billRef);
       });
-    } catch (error: any) {
-      handleFirestoreError(error, 'delete', `bills/${bill.id}`);
-    }
+    }, "deleting bill");
   };
 
   if (isCreating) {
@@ -734,12 +843,7 @@ const Sales: React.FC = () => {
         <div className="space-y-6">
         <div className="flex items-center gap-4">
           <button 
-            onClick={() => {
-              setIsCreating(false);
-              setEditingDraftId(null);
-              setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
-              setBillDate(new Date().toISOString().split('T')[0]);
-            }} 
+            onClick={resetForm} 
             className="flex items-center gap-2 px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-slate-200 transition-all active:scale-95 shadow-sm"
           >
             <ChevronRight className="w-4 h-4 rotate-180" />
@@ -747,6 +851,29 @@ const Sales: React.FC = () => {
           </button>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{editingDraftId ? 'Edit Draft Bill' : 'New Sales Bill'}</h1>
         </div>
+
+        {showRecoveryBanner && (
+          <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 animate-in slide-in-from-top-2 duration-300">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center">
+                <Save className="w-4 h-4 text-amber-600" />
+              </div>
+              <div>
+                <p className="text-amber-900 text-sm font-bold tracking-tight">Bill Restored</p>
+                <p className="text-amber-700 text-xs font-medium">We found and recovered your unsaved bill data.</p>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                resetForm();
+                setShowRecoveryBanner(false);
+              }}
+              className="px-4 py-2 bg-amber-600/10 text-amber-700 text-xs font-bold rounded-lg hover:bg-amber-600/20 transition-colors uppercase tracking-wider"
+            >
+              Discard
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">

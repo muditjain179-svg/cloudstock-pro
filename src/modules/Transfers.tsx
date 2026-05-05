@@ -15,7 +15,8 @@ import {
   where,
   setDoc,
   serverTimestamp,
-  addDoc
+  addDoc,
+  DocumentSnapshot
 } from 'firebase/firestore';
 import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
@@ -49,6 +50,7 @@ const Transfers: React.FC = () => {
   const [isCreating, setIsCreating] = useState(false);
   const [isOpeningStock, setIsOpeningStock] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [itemSearch, setItemSearch] = useState('');
   const [showItemSearch, setShowItemSearch] = useState(false);
 
@@ -65,6 +67,7 @@ const Transfers: React.FC = () => {
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [lastFinalizedBill, setLastFinalizedBill] = useState<Bill | null>(null);
   const [billDate, setBillDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [showRecoveryBanner, setShowRecoveryBanner] = useState(false);
   const addItemButtonRef = useRef<HTMLButtonElement>(null);
 
   const [billData, setBillData] = useState<{
@@ -100,6 +103,140 @@ const Transfers: React.FC = () => {
     };
   }, [user]);
 
+  const ITEM_DOC_TIMEOUT = 10000;
+  const GLOBAL_SUBMISSION_TIMEOUT = 30000;
+
+  const checkDocWithTimeout = async (ref: any) => {
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Stock check for item timed out. Path: ${ref.path}`)), ITEM_DOC_TIMEOUT)
+    );
+    return Promise.race([getDoc(ref), timeout]) as Promise<DocumentSnapshot>;
+  };
+
+  const handleAsyncAction = async (action: () => Promise<void>, actionName: string) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSubmissionError(null);
+
+    const safetyTimer = setTimeout(() => {
+      setIsSaving(false);
+      setSubmissionError(`The ${actionName} operation timed out. Please check your connection and try again.`);
+      alert(`The ${actionName} operation timed out. Please check your connection and try again.`);
+    }, GLOBAL_SUBMISSION_TIMEOUT);
+
+    try {
+      await action();
+    } catch (error: any) {
+      console.error(`Error during ${actionName}:`, error);
+      let message = error.message || `An error occurred during ${actionName}`;
+      if (error.code === 'unavailable') {
+        message = 'No internet connection. Please check your network and try again.';
+      } else if (error.code === 'permission-denied') {
+        message = 'Permission denied. Please contact your admin.';
+      } else if (message.includes('timed out')) {
+        message = 'Request timed out. Please try again.';
+      }
+      setSubmissionError(message);
+      alert(message);
+    } finally {
+      clearTimeout(safetyTimer);
+      setIsSaving(false);
+    }
+  };
+
+  // Auto-restore form state
+  useEffect(() => {
+    // We check for both transfer and opening stock drafts
+    const transferSaved = localStorage.getItem('draft_transfer');
+    const openingStockSaved = localStorage.getItem('draft_opening_stock');
+
+    const restoreDraft = (saved: string, type: 'transfer' | 'opening_stock') => {
+      try {
+        const formState = JSON.parse(saved);
+        const age = Date.now() - formState.savedAt;
+        
+        // Only restore if saved less than 24 hours ago
+        if (age > 24 * 60 * 60 * 1000) {
+          localStorage.removeItem(`draft_${type}`);
+          return false;
+        }
+
+        if (formState.items?.length > 0 || formState.salesman) {
+          // Verify items and salesman still exist
+          const validatedItems = formState.items.filter((bi: BillItem) => 
+            items.find(i => i.id === bi.itemId)
+          );
+          
+          if (validatedItems.length < formState.items.length) {
+            alert(`Some items were removed from your restored ${type.replace('_', ' ')} as they no longer exist in inventory.`);
+          }
+
+          const validatedSalesman = formState.salesman && salesmen.find(s => s.id === formState.salesman.id) 
+            ? formState.salesman 
+            : null;
+          
+          if (formState.salesman && !validatedSalesman) {
+            alert("Previously selected salesman no longer exists. Please select again.");
+          }
+
+          setBillData({
+            items: validatedItems,
+            salesman: validatedSalesman
+          });
+          setBillDate(formState.billDate || new Date().toISOString().split('T')[0]);
+          setIsOpeningStock(type === 'opening_stock');
+          setShowRecoveryBanner(true);
+          setIsCreating(true);
+          return true;
+        }
+      } catch (e) {
+        console.error(`Error restoring ${type} draft:`, e);
+        localStorage.removeItem(`draft_${type}`);
+      }
+      return false;
+    };
+
+    // Prioritize restoring a draft if one exists
+    if (transferSaved) {
+      if (restoreDraft(transferSaved, 'transfer')) return;
+    }
+    if (openingStockSaved) {
+      restoreDraft(openingStockSaved, 'opening_stock');
+    }
+  }, [items, salesmen]);
+
+  // Auto-save form state
+  useEffect(() => {
+    if (!isCreating || isSaving || (billData.items.length === 0 && !billData.salesman)) return;
+
+    const timeoutId = setTimeout(() => {
+      try {
+        const type = isOpeningStock ? 'opening_stock' : 'transfer';
+        const formState = {
+          items: billData.items,
+          salesman: billData.salesman,
+          billDate,
+          savedAt: Date.now()
+        };
+        localStorage.setItem(`draft_${type}`, JSON.stringify(formState));
+      } catch (e) {
+        console.warn("Failed to auto-save transfer draft:", e);
+      }
+    }, 1000);
+
+    return () => clearTimeout(timeoutId);
+  }, [billData.items, billData.salesman, billDate, isCreating, isOpeningStock]);
+
+  const resetForm = () => {
+    const type = isOpeningStock ? 'opening_stock' : 'transfer';
+    setBillData({ salesman: null, items: [] });
+    setBillDate(new Date().toISOString().split('T')[0]);
+    setIsCreating(false);
+    setIsOpeningStock(false);
+    setShowRecoveryBanner(false);
+    localStorage.removeItem(`draft_${type}`);
+  };
+
   const handleTransfer = async () => {
     if (!billData.salesman) {
       alert("Please select a salesman");
@@ -127,8 +264,7 @@ const Transfers: React.FC = () => {
     }
 
     if (!showFinalizeOverlay) {
-      setIsSaving(true);
-      try {
+      handleAsyncAction(async () => {
         const blob = await generateTransferPDF({
           title: isOpeningStock ? 'OPENING STOCK' : 'STOCK TRANSFER',
           themeColor: isOpeningStock ? '#ea580c' : '#16a34a',
@@ -149,14 +285,11 @@ const Transfers: React.FC = () => {
         const url = URL.createObjectURL(blob);
         setPdfPreviewUrl(url);
         setShowFinalizeOverlay(true);
-      } finally {
-        setIsSaving(false);
-      }
+      }, "generating transfer preview");
       return;
     }
 
-    setIsSaving(true);
-    try {
+    handleAsyncAction(async () => {
       const itemUpdates: Array<{ ref: any, currentStock: number, qty: number }> = [];
       const salesmanUpdates: Array<{ 
         ref: any, 
@@ -171,7 +304,7 @@ const Transfers: React.FC = () => {
         // 1. Decrease Main Stock (Only if NOT opening stock)
         if (!isOpeningStock) {
           const itemRef = doc(db, 'items', billItem.itemId);
-          const itemDoc = await getDoc(itemRef);
+          const itemDoc = await checkDocWithTimeout(itemRef);
           const currentMainStock = itemDoc.data()?.mainStock || 0;
           if (currentMainStock < billItem.quantity) throw new Error(`Insufficient main stock for ${billItem.name}`);
           itemUpdates.push({ ref: itemRef, currentStock: currentMainStock, qty: billItem.quantity });
@@ -179,8 +312,8 @@ const Transfers: React.FC = () => {
 
         // 2. Increase Salesman Stock
         const salesmanInvRef = doc(db, `inventories/${billData.salesman!.id}/items`, billItem.itemId);
-        const salesmanInvDoc = await getDoc(salesmanInvRef);
-        const currentSalesmanStock = salesmanInvDoc.exists() ? (salesmanInvDoc.data().quantity || 0) : 0;
+        const salesmanInvDoc = await checkDocWithTimeout(salesmanInvRef);
+        const currentSalesmanStock = salesmanInvDoc.exists() ? (salesmanInvDoc.data()?.quantity || 0) : 0;
         
         salesmanUpdates.push({ 
           ref: salesmanInvRef, 
@@ -275,17 +408,15 @@ const Transfers: React.FC = () => {
 
         if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
         setPdfPreviewUrl(URL.createObjectURL(blob));
+        resetForm();
       } else {
         setIsCreating(false);
         setIsOpeningStock(false);
         setBillData({ salesman: null, items: [] });
         setBillDate(new Date().toISOString().split('T')[0]);
+        resetForm();
       }
-    } catch (error: any) {
-      alert(error.message || "Error processing transfer");
-    } finally {
-      setIsSaving(false);
-    }
+    }, "processing transfer");
   };
 
   const shareTransferPDF = async (bill: Bill) => {
@@ -352,8 +483,7 @@ const Transfers: React.FC = () => {
       return;
     }
 
-    setIsAddingItem(true);
-    try {
+    handleAsyncAction(async () => {
       const newItemId = crypto.randomUUID();
       const newItemRef = doc(db, 'items', newItemId);
       
@@ -385,7 +515,6 @@ const Transfers: React.FC = () => {
       setItemSearch('');
 
       setTimeout(() => {
-        const itemIdx = billData.items.length; // The new item will be at the end
         const qtyInputs = document.querySelectorAll('input[type="number"]');
         if (qtyInputs && qtyInputs.length > 0) {
           (qtyInputs[qtyInputs.length - 1] as HTMLInputElement).focus();
@@ -393,11 +522,7 @@ const Transfers: React.FC = () => {
       }, 300);
 
       alert("Item created! Now enter the opening stock quantity.");
-    } catch (error: any) {
-      alert(error.message || "Error creating item");
-    } finally {
-      setIsAddingItem(false);
-    }
+    }, "creating item");
   };
 
   const downloadTransferPDF = async (bill: Bill) => {
@@ -426,7 +551,7 @@ const Transfers: React.FC = () => {
     const confirmed = window.confirm(`Are you sure you want to delete transfer #${bill.billNumber}? Stock will be returned to main inventory from salesman.`);
     if (!confirmed) return;
 
-    try {
+    handleAsyncAction(async () => {
       await runTransaction(db, async (transaction) => {
         const billRef = doc(db, 'bills', bill.id);
         const billDoc = await transaction.get(billRef);
@@ -449,7 +574,7 @@ const Transfers: React.FC = () => {
           // 2. Remove from Salesman Stock
           const salesmanInvRef = doc(db, `inventories/${bData.entityId}/items`, billItem.itemId);
           const salesmanInvDoc = await transaction.get(salesmanInvRef);
-          const currentSalesmanStock = salesmanInvDoc.exists() ? (salesmanInvDoc.data().quantity || 0) : 0;
+          const currentSalesmanStock = salesmanInvDoc.exists() ? (salesmanInvDoc.data()?.quantity || 0) : 0;
           salesmanUpdates.push({ ref: salesmanInvRef, currentStock: currentSalesmanStock, qty: billItem.quantity });
         }
 
@@ -468,9 +593,7 @@ const Transfers: React.FC = () => {
 
         transaction.delete(billRef);
       });
-    } catch (error: any) {
-      handleFirestoreError(error, 'delete', `bills/${bill.id}`);
-    }
+    }, "deleting transfer");
   };
 
   const addItemToTransfer = (item: Item) => {
@@ -506,16 +629,36 @@ const Transfers: React.FC = () => {
       <div className="space-y-6">
         <div className="flex items-center gap-4">
           <button 
-            onClick={() => {
-              setIsCreating(false);
-              setBillDate(new Date().toISOString().split('T')[0]);
-            }} 
+            onClick={resetForm} 
             className="p-2 hover:bg-slate-200 rounded-full transition-colors"
           >
             <X />
           </button>
           <h1 className="text-2xl font-bold">{isOpeningStock ? 'Add Opening Stock' : 'New Stock Transfer'}</h1>
         </div>
+
+        {showRecoveryBanner && (
+          <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 animate-in slide-in-from-top-2 duration-300">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center">
+                <Truck className="w-4 h-4 text-amber-600" />
+              </div>
+              <div>
+                <p className="text-amber-900 text-sm font-bold tracking-tight">{isOpeningStock ? 'Opening Stock' : 'Transfer'} Restored</p>
+                <p className="text-amber-700 text-xs font-medium">We found and recovered your unsaved data.</p>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                resetForm();
+                setShowRecoveryBanner(false);
+              }}
+              className="px-4 py-2 bg-amber-600/10 text-amber-700 text-xs font-bold rounded-lg hover:bg-amber-600/20 transition-colors uppercase tracking-wider"
+            >
+              Discard
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">
@@ -829,13 +972,7 @@ const Transfers: React.FC = () => {
                         Share Receipt
                       </button>
                       <button 
-                         onClick={() => {
-                           setIsCreating(false);
-                           setShowFinalizeOverlay(false);
-                           setPdfPreviewUrl(null);
-                           setLastFinalizedBill(null);
-                           setBillData({ salesman: null, items: [] });
-                         }}
+                         onClick={resetForm}
                          className="py-3 sm:py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-black transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs"
                       >
                         Done
