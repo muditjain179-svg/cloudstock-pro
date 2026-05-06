@@ -14,7 +14,12 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').then(registration => {
       // Check for updates every 60 seconds
       setInterval(() => {
-        registration.update();
+        registration.update().catch(err => {
+          // Ignore failed updates in dev environment
+          if (process.env.NODE_ENV !== 'production') {
+            console.debug('SW Update suppressed in dev:', err);
+          }
+        });
       }, 60000);
 
       registration.addEventListener('updatefound', () => {

@@ -13,6 +13,7 @@ const swVersionPlugin = () => {
   return {
     name: 'sw-version-plugin',
     buildStart() {
+      if (process.env.NODE_ENV !== 'production') return;
       try {
         const swPath = path.resolve(__dirname, 'public/sw.js');
         if (fs.existsSync(swPath)) {

@@ -55,7 +55,7 @@ const Inventory: React.FC = () => {
   const [selectedSalesmanId, setSelectedSalesmanId] = useState<string>('');
   const [salesmanInventory, setSalesmanInventory] = useState<Record<string, number>>({});
   const [searchTerm, setSearchTerm] = useState('');
-  const [pdfLowStockOnly, setPdfLowStockOnly] = useState(false);
+  const [showLowStockOnly, setShowLowStockOnly] = useState(false);
   const [filterBrand, setFilterBrand] = useState('');
   const [filterCategory, setFilterCategory] = useState('');
   const [isModalOpen, setModalOpen] = useState(false);
@@ -268,13 +268,7 @@ const Inventory: React.FC = () => {
 
   const generateStockSummaryPDF = () => {
     // Determine which items to include
-    let itemsToProcess = [...filteredItems];
-    if (pdfLowStockOnly) {
-      itemsToProcess = itemsToProcess.filter(item => {
-        const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
-        return stock <= (item.lowStockThreshold || 5);
-      });
-    }
+    const itemsToProcess = [...filteredItems];
 
     // Sort items: Group by Brand (A→Z), then by Name (A→Z) within brand
     const sortedItems = itemsToProcess.sort((a, b) => {
@@ -339,22 +333,28 @@ const Inventory: React.FC = () => {
     // Location Value in INDIGO Color
     doc.setTextColor(99, 102, 241);
     doc.setFont('helvetica', 'bold');
-    const locationBase = selectedSalesmanId ? (allSalesmen.find(s => s.id === selectedSalesmanId)?.name || 'SALESMAN') : 'MAIN STORE';
+    
+    let locationBase = 'MAIN STORE';
+    if (user?.role === 'salesman') {
+      locationBase = 'MY PERSONAL STOCK';
+    } else if (selectedSalesmanId) {
+      locationBase = (allSalesmen.find(s => s.id === selectedSalesmanId)?.name || 'SALESMAN').toUpperCase();
+    }
     
     // Determine Filter Status
     let filterStatus = 'All Items';
-    if (pdfLowStockOnly) filterStatus = 'Low Stock Items Only';
+    if (showLowStockOnly) filterStatus = 'Low Stock Items Only';
     else if (filterBrand) filterStatus = `Brand: ${filterBrand}`;
     else if (filterCategory) filterStatus = `Category: ${filterCategory}`;
-    else if (searchTerm) filterStatus = `Results for "${searchTerm}"`;
+    else if (searchTerm) filterStatus = `Search: ${searchTerm}`;
     
-    // Special check for "Low Stock" if not already explicitly forced
-    if (!pdfLowStockOnly) {
-      const isOnlyLowStock = sortedItems.length > 0 && sortedItems.every(item => {
+    // Fallback check if filteredItems is already effectively low stock
+    if (!showLowStockOnly && sortedItems.length > 0 && sortedItems.length < items.length) {
+      const isOnlyLowStock = sortedItems.every(item => {
         const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
         return stock <= (item.lowStockThreshold || 5);
       });
-      if (isOnlyLowStock && sortedItems.length < items.length) {
+      if (isOnlyLowStock) {
         filterStatus = 'Low Stock Items Only';
       }
     }
@@ -513,24 +513,26 @@ const Inventory: React.FC = () => {
   }), [items]);
 
   const filteredItems = useMemo(() => {
-    let result = items;
+    const isSalesman = user?.role === 'salesman';
+    const isAdmin = user?.role === 'admin';
+    const term = searchTerm.trim();
     
-    if (searchTerm.trim()) {
-      result = fuse.search(searchTerm).map(res => res.item);
-    }
+    let result = term ? fuse.search(term).map(res => res.item) : items;
 
     return result.filter(item => {
-      const isSalesman = user?.role === 'salesman';
       const myStock = salesmanInventory[item.id] || 0;
+      const currentStock = (isAdmin && !selectedSalesmanId) ? item.mainStock : myStock;
+      const isLow = currentStock <= (item.lowStockThreshold || 5);
+
+      if (isSalesman && myStock <= 0) return false;
+      if (isAdmin && selectedSalesmanId && !(salesmanInventory[item.id] > 0)) return false;
+      if (filterBrand && item.brand !== filterBrand) return false;
+      if (filterCategory && item.category !== filterCategory) return false;
+      if (showLowStockOnly && !isLow) return false;
       
-      const matchesUserStock = !isSalesman || myStock > 0;
-      const matchesSelectedStock = (user?.role === 'admin' && selectedSalesmanId) ? (salesmanInventory[item.id] > 0) : true;
-      const matchesBrand = !filterBrand || item.brand === filterBrand;
-      const matchesCategory = !filterCategory || item.category === filterCategory;
-      
-      return matchesBrand && matchesCategory && matchesUserStock && matchesSelectedStock;
+      return true;
     });
-  }, [items, searchTerm, fuse, user, salesmanInventory, selectedSalesmanId, filterBrand, filterCategory]);
+  }, [items, searchTerm, fuse, user?.id, user?.role, salesmanInventory, selectedSalesmanId, filterBrand, filterCategory, showLowStockOnly]);
 
   if (itemsLoading) return <div>Loading inventory...</div>;
 
@@ -550,19 +552,19 @@ const Inventory: React.FC = () => {
         <div className="flex items-center gap-2">
           <div className="flex bg-gray-100 p-1 rounded-lg border border-gray-200">
             <button
-              onClick={() => setPdfLowStockOnly(false)}
+              onClick={() => setShowLowStockOnly(false)}
               className={cn(
                 "px-3 py-1 text-[10px] font-black uppercase rounded-md transition-all",
-                !pdfLowStockOnly ? "bg-white text-indigo-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+                !showLowStockOnly ? "bg-white text-indigo-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
               )}
             >
               Full
             </button>
             <button
-              onClick={() => setPdfLowStockOnly(true)}
+              onClick={() => setShowLowStockOnly(true)}
               className={cn(
                 "px-3 py-1 text-[10px] font-black uppercase rounded-md transition-all",
-                pdfLowStockOnly ? "bg-white text-red-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+                showLowStockOnly ? "bg-white text-red-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
               )}
             >
               Low Stock
@@ -641,9 +643,9 @@ const Inventory: React.FC = () => {
             <option value="">Brands</option>
             {brands.map(b => <option key={b.id} value={b.name}>{b.name}</option>)}
           </select>
-          {(filterBrand || filterCategory || searchTerm || selectedSalesmanId) && (
+          {(filterBrand || filterCategory || searchTerm || selectedSalesmanId || showLowStockOnly) && (
             <button 
-              onClick={() => { setSearchTerm(''); setFilterBrand(''); setFilterCategory(''); setSelectedSalesmanId(''); }}
+              onClick={() => { setSearchTerm(''); setFilterBrand(''); setFilterCategory(''); setSelectedSalesmanId(''); setShowLowStockOnly(false); }}
               className="p-3 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
             >
               <X className="w-5 h-5" />
@@ -656,14 +658,12 @@ const Inventory: React.FC = () => {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         <AnimatePresence mode="popLayout">
           {filteredItems.map((item) => {
-            const hasSalesmanFilter = user?.role === 'admin' && selectedSalesmanId;
             const currentDisplayStock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
-            const isLow = currentDisplayStock < (item.lowStockThreshold || 5);
+            const isLow = currentDisplayStock <= (item.lowStockThreshold || 5);
 
             return (
               <motion.div
                 key={item.id}
-                layout
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95 }}
