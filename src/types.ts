@@ -50,6 +50,7 @@ export interface Supplier {
 export interface BillItem {
   itemId: string;
   name: string;
+  brand: string;
   quantity: number;
   price: number;
 }

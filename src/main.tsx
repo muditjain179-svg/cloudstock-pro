@@ -23,7 +23,7 @@ if ('serviceWorker' in navigator) {
           newWorker.addEventListener('statechange', () => {
             if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
               // New worker is ready and there's an existing one - send skip waiting
-              newWorker.postMessage('SKIP_WAITING');
+              newWorker.postMessage({ type: 'SKIP_WAITING' });
             }
           });
         }

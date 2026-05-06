@@ -32,6 +32,7 @@ const Brands: React.FC = () => {
     e.preventDefault();
     if (isSubmitting) return;
     setIsSubmitting(true);
+    const safetyTimer = setTimeout(() => setIsSubmitting(false), 30000);
     try {
       if (editingBrand) {
         await updateDoc(doc(db, 'brands', editingBrand.id), formData);
@@ -42,9 +43,11 @@ const Brands: React.FC = () => {
       setModalOpen(false);
       setEditingBrand(null);
       setFormData({ name: '' });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error saving brand:", error);
+      alert("Error saving brand: " + (error.message || "An unknown error occurred"));
     } finally {
+      clearTimeout(safetyTimer);
       setIsSubmitting(false);
     }
   };

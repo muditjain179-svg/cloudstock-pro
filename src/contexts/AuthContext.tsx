@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { onAuthStateChanged, signOut, GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
@@ -73,7 +73,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsubscribe();
   }, []);
 
-  const signIn = async () => {
+  const signIn = useCallback(async () => {
     if (isSigningIn) return;
     setIsSigningIn(true);
     try {
@@ -83,18 +83,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setIsSigningIn(false);
     }
-  };
+  }, [isSigningIn]);
 
-  const logout = async () => {
+  const logout = useCallback(async () => {
     await signOut(auth);
     setUser(null);
-  }
+  }, []);
 
-  const signInWithEmail = async (email: string, pass: string) => {
-    await signInWithEmailAndPassword(auth, email, pass);
-  };
+  const signInWithEmail = useCallback(async (email: string, pass: string) => {
+    try {
+      await signInWithEmailAndPassword(auth, email, pass);
+    } catch (error: any) {
+      const messages: Record<string, string> = {
+        'auth/user-not-found': 'No account found with this email.',
+        'auth/wrong-password': 'Incorrect password. Please try again.',
+        'auth/invalid-credential': 'Invalid email or password.',
+        'auth/too-many-requests': 'Too many attempts. Try again later.',
+        'auth/network-request-failed': 'Network error. Check your connection.',
+        'auth/user-disabled': 'This account has been disabled. Contact admin.',
+      };
+      throw new Error(messages[error.code] || error.message);
+    }
+  }, []);
 
-  const signUpWithEmail = async (email: string, pass: string, name: string) => {
+  const signUpWithEmail = useCallback(async (email: string, pass: string, name: string) => {
     const cred = await createUserWithEmailAndPassword(auth, email, pass);
     const profile: UserProfile = {
       id: cred.user.uid,
@@ -104,7 +116,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
     await setDoc(doc(db, 'users', cred.user.uid), profile);
     setUser(profile);
-  };
+  }, []);
 
   const value = useMemo(() => ({ 
     user, 

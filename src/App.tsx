@@ -75,25 +75,6 @@ const MainLayout: React.FC = () => {
   useEffect(() => {
     if (!user) return;
     
-    // Preload critical collections for caching
-    const preloadCollections = async () => {
-      const collectionsToPreload = ['items', 'brands', 'categories', 'customers', 'suppliers'];
-      for (const colName of collectionsToPreload) {
-        if (!isCacheFresh(colName)) {
-          try {
-            const q = query(collection(db, colName), orderBy('name', 'asc'));
-            const snapshot = await getDocs(q);
-            const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setCache(colName, data);
-          } catch (error) {
-            console.warn(`Silent preload failed for ${colName}:`, error);
-          }
-        }
-      }
-    };
-
-    preloadCollections();
-
     let unsub: () => void;
 
     if (user.role === 'admin') {
@@ -105,7 +86,7 @@ const MainLayout: React.FC = () => {
     } else {
       unsub = onSnapshot(collection(db, `inventories/${user.id}/items`), (snapshot) => {
         const salesmanItems = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setLowStockCount(salesmanItems.filter((i: any) => i.quantity <= 2).length);
+        setLowStockCount(salesmanItems.filter((i: any) => (i.quantity || 0) <= (i.lowStockThreshold || 5)).length);
       });
     }
     
@@ -207,10 +188,10 @@ const MainLayout: React.FC = () => {
               </div>
             </div>
             <button
-              onClick={() => {
-                logout();
+              onClick={async () => {
                 clearCache();
-                clearIndexedDB();
+                await clearIndexedDB();
+                await logout();
               }}
               className="flex items-center gap-3 w-full px-4 py-2 rounded-lg text-rose-400 hover:bg-rose-900/20 transition-colors text-xs font-bold"
             >

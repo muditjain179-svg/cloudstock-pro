@@ -170,6 +170,7 @@ const Inventory: React.FC = () => {
     }
 
     setIsSubmitting(true);
+    const safetyTimer = setTimeout(() => setIsSubmitting(false), 30000);
     try {
       const payload = {
         ...formData,
@@ -218,9 +219,11 @@ const Inventory: React.FC = () => {
         });
         setErrors({});
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error saving item:", error);
+      alert("Error saving item: " + (error.message || "An unknown error occurred"));
     } finally {
+      clearTimeout(safetyTimer);
       setIsSubmitting(false);
     }
   };

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   collection, 
   onSnapshot, 
@@ -18,6 +18,7 @@ import {
   addDoc,
   DocumentSnapshot
 } from 'firebase/firestore';
+import Fuse from 'fuse.js';
 import { db, handleFirestoreError } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppData } from '../lib/useAppData';
@@ -41,8 +42,8 @@ import { generateTransferPDF, generateWhatsAppLink, cn } from '../lib/utils';
 const Transfers: React.FC = () => {
   const { user } = useAuth();
   
-  const { data: items } = useAppData<Item>('items', [orderBy('name')]);
-  const { data: salesmen } = useAppData<UserProfile>('users', [where('role', '==', 'salesman')]);
+  const { data: items, isLoading: itemsLoading } = useAppData<Item>('items', [orderBy('name')]);
+  const { data: salesmen, isLoading: salesmenLoading } = useAppData<UserProfile>('users', [where('role', '==', 'salesman')]);
   const { data: brands } = useAppData<Brand>('brands', [orderBy('name')]);
   const { data: categories } = useAppData<Category>('categories', [orderBy('name')]);
 
@@ -67,7 +68,7 @@ const Transfers: React.FC = () => {
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [lastFinalizedBill, setLastFinalizedBill] = useState<Bill | null>(null);
   const [billDate, setBillDate] = useState<string>(new Date().toISOString().split('T')[0]);
-  const [showRecoveryBanner, setShowRecoveryBanner] = useState(false);
+  const hasRestored = useRef(false);
   const addItemButtonRef = useRef<HTMLButtonElement>(null);
 
   const [billData, setBillData] = useState<{
@@ -78,14 +79,37 @@ const Transfers: React.FC = () => {
     items: []
   });
 
-  const filteredItems = items.filter(i => {
-    const matchesSearch = i.name.toLowerCase().includes(itemSearch.toLowerCase()) || 
-                          i.brand.toLowerCase().includes(itemSearch.toLowerCase());
-    return (isOpeningStock || i.mainStock > 0) && matchesSearch;
-  });
+  const itemFuse = useMemo(() => new Fuse(
+    isOpeningStock ? items : items.filter(i => i.mainStock > 0),
+    {
+      keys: [
+        { name: 'name', weight: 0.6 },
+        { name: 'brand', weight: 0.3 },
+        { name: 'category', weight: 0.1 },
+      ],
+      threshold: 0.4,
+      ignoreLocation: true,
+      useExtendedSearch: true,
+      includeScore: true,
+      minMatchCharLength: 1,
+    }
+  ), [items, isOpeningStock]);
+
+  const filteredItems = useMemo(() => {
+    const baseItems = isOpeningStock ? items : items.filter(i => i.mainStock > 0);
+    if (!itemSearch.trim()) return baseItems;
+    return itemFuse.search(itemSearch).map(result => result.item);
+  }, [itemSearch, itemFuse, items, isOpeningStock]);
+
+  const billsLoadedRef = useRef(false);
+  const userId = user?.id;
+  const userRole = user?.role;
 
   useEffect(() => {
-    if (user?.role !== 'admin') return;
+    if (userRole !== 'admin' || !userId) return;
+
+    if (billsLoadedRef.current) return;
+    billsLoadedRef.current = true;
 
     const billsQ = query(
       collection(db, 'bills'), 
@@ -100,8 +124,9 @@ const Transfers: React.FC = () => {
 
     return () => { 
       unsubBills(); 
+      billsLoadedRef.current = false;
     };
-  }, [user]);
+  }, [userId, userRole]);
 
   const ITEM_DOC_TIMEOUT = 10000;
   const GLOBAL_SUBMISSION_TIMEOUT = 30000;
@@ -146,6 +171,8 @@ const Transfers: React.FC = () => {
 
   // Auto-restore form state
   useEffect(() => {
+    if (hasRestored.current || itemsLoading || salesmenLoading || salesmen.length === 0) return;
+
     // We check for both transfer and opening stock drafts
     const transferSaved = localStorage.getItem('draft_transfer');
     const openingStockSaved = localStorage.getItem('draft_opening_stock');
@@ -161,31 +188,25 @@ const Transfers: React.FC = () => {
           return false;
         }
 
-        if (formState.items?.length > 0 || formState.salesman) {
+        // ONLY restore if the form is currently empty
+        const isFormEmpty = billData.items.length === 0 && !billData.salesman;
+
+        if (isFormEmpty && (formState.items?.length > 0 || formState.salesman)) {
           // Verify items and salesman still exist
-          const validatedItems = formState.items.filter((bi: BillItem) => 
+          const validatedItems = (formState.items || []).filter((bi: BillItem) => 
             items.find(i => i.id === bi.itemId)
           );
           
-          if (validatedItems.length < formState.items.length) {
-            alert(`Some items were removed from your restored ${type.replace('_', ' ')} as they no longer exist in inventory.`);
-          }
-
-          const validatedSalesman = formState.salesman && salesmen.find(s => s.id === formState.salesman.id) 
-            ? formState.salesman 
+          const validatedSalesman = formState.salesman
+            ? salesmen.find(s => s.id === formState.salesman.id) || null
             : null;
           
-          if (formState.salesman && !validatedSalesman) {
-            alert("Previously selected salesman no longer exists. Please select again.");
-          }
-
           setBillData({
             items: validatedItems,
             salesman: validatedSalesman
           });
           setBillDate(formState.billDate || new Date().toISOString().split('T')[0]);
           setIsOpeningStock(type === 'opening_stock');
-          setShowRecoveryBanner(true);
           setIsCreating(true);
           return true;
         }
@@ -198,16 +219,23 @@ const Transfers: React.FC = () => {
 
     // Prioritize restoring a draft if one exists
     if (transferSaved) {
-      if (restoreDraft(transferSaved, 'transfer')) return;
+      if (restoreDraft(transferSaved, 'transfer')) {
+        hasRestored.current = true;
+        return;
+      }
     }
     if (openingStockSaved) {
-      restoreDraft(openingStockSaved, 'opening_stock');
+      if (restoreDraft(openingStockSaved, 'opening_stock')) {
+        hasRestored.current = true;
+        return;
+      }
     }
-  }, [items, salesmen]);
+    hasRestored.current = true;
+  }, [itemsLoading, salesmenLoading, items, salesmen]);
 
   // Auto-save form state
   useEffect(() => {
-    if (!isCreating || isSaving || (billData.items.length === 0 && !billData.salesman)) return;
+    if (!isCreating || isSaving || !hasRestored.current || (billData.items.length === 0 && !billData.salesman)) return;
 
     const timeoutId = setTimeout(() => {
       try {
@@ -225,7 +253,7 @@ const Transfers: React.FC = () => {
     }, 1000);
 
     return () => clearTimeout(timeoutId);
-  }, [billData.items, billData.salesman, billDate, isCreating, isOpeningStock]);
+  }, [billData.items, billData.salesman, billDate, isCreating, isOpeningStock, isSaving]);
 
   const resetForm = () => {
     const type = isOpeningStock ? 'opening_stock' : 'transfer';
@@ -233,7 +261,6 @@ const Transfers: React.FC = () => {
     setBillDate(new Date().toISOString().split('T')[0]);
     setIsCreating(false);
     setIsOpeningStock(false);
-    setShowRecoveryBanner(false);
     localStorage.removeItem(`draft_${type}`);
   };
 
@@ -598,20 +625,31 @@ const Transfers: React.FC = () => {
 
   const addItemToTransfer = (item: Item) => {
     const existing = billData.items.find(i => i.itemId === item.id);
-    if (existing) return;
-    // We add brand to the local state so it can be used for PDF generation
-    const newItems = [...billData.items, { 
-      itemId: item.id, 
-      name: item.name, 
-      quantity: '' as any, 
-      price: 0,
-      brand: item.brand, // Add brand here
-      newItemCreated: (item as any).createdVia === 'opening_stock'
-    } as any];
-    setBillData({
-      ...billData,
-      items: newItems
-    });
+    if (existing) {
+      // Show feedback instead of silently ignoring
+      setSubmissionError(`"${item.name}" is already in the transfer. Update the quantity instead.`);
+      setTimeout(() => setSubmissionError(null), 3000);
+      return;
+    }
+
+    setBillData(prev => ({
+      ...prev,
+      items: [...prev.items, { 
+        itemId: item.id, 
+        name: item.name, 
+        quantity: '' as any, 
+        price: 0,
+        brand: item.brand,
+        newItemCreated: (item as any).createdVia === 'opening_stock'
+      } as any]
+    }));
+
+    // Reset search query but keep dropdown open
+    setItemSearch('');
+    // Re-focus search input
+    setTimeout(() => {
+      document.querySelector<HTMLInputElement>('.item-search-input')?.focus();
+    }, 50);
 
     // After adding new item row scroll to it
     setTimeout(() => {
@@ -626,7 +664,11 @@ const Transfers: React.FC = () => {
 
   if (isCreating) {
     return (
-      <div className="space-y-6">
+      <motion.div 
+        initial={{ opacity: 0, x: 20 }}
+        animate={{ opacity: 1, x: 0 }}
+        className="space-y-6"
+      >
         <div className="flex items-center gap-4">
           <button 
             onClick={resetForm} 
@@ -636,29 +678,6 @@ const Transfers: React.FC = () => {
           </button>
           <h1 className="text-2xl font-bold">{isOpeningStock ? 'Add Opening Stock' : 'New Stock Transfer'}</h1>
         </div>
-
-        {showRecoveryBanner && (
-          <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 animate-in slide-in-from-top-2 duration-300">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center">
-                <Truck className="w-4 h-4 text-amber-600" />
-              </div>
-              <div>
-                <p className="text-amber-900 text-sm font-bold tracking-tight">{isOpeningStock ? 'Opening Stock' : 'Transfer'} Restored</p>
-                <p className="text-amber-700 text-xs font-medium">We found and recovered your unsaved data.</p>
-              </div>
-            </div>
-            <button
-              onClick={() => {
-                resetForm();
-                setShowRecoveryBanner(false);
-              }}
-              className="px-4 py-2 bg-amber-600/10 text-amber-700 text-xs font-bold rounded-lg hover:bg-amber-600/20 transition-colors uppercase tracking-wider"
-            >
-              Discard
-            </button>
-          </div>
-        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">
@@ -686,8 +705,11 @@ const Transfers: React.FC = () => {
                 className="w-full p-3 border rounded-xl"
                 value={billData.salesman?.id || ''}
                 onChange={(e) => setBillData({...billData, salesman: salesmen.find(s => s.id === e.target.value) || null})}
+                disabled={salesmenLoading}
               >
-                <option value="">Select a salesman</option>
+                <option value="">
+                  {salesmenLoading ? 'Loading salesmen...' : 'Select a salesman'}
+                </option>
                 {salesmen.map(s => <option key={s.id} value={s.id}>{s.name} ({s.email})</option>)}
               </select>
             </div>
@@ -773,7 +795,7 @@ const Transfers: React.FC = () => {
                           placeholder="SEARCH ITEM..."
                           value={itemSearch}
                           onChange={(e) => setItemSearch(e.target.value)}
-                          className="w-full pl-12 pr-12 py-4 bg-slate-50 border-2 border-indigo-100 rounded-2xl focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none text-sm font-bold placeholder:text-slate-400 transition-all uppercase tracking-tight"
+                          className="item-search-input w-full pl-12 pr-12 py-4 bg-slate-50 border-2 border-indigo-100 rounded-2xl focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none text-sm font-bold placeholder:text-slate-400 transition-all uppercase tracking-tight"
                         />
                         <button 
                           onClick={() => { setShowItemSearch(false); setItemSearch(''); }}
@@ -794,8 +816,6 @@ const Transfers: React.FC = () => {
                                 key={item.id}
                                 onClick={() => {
                                   addItemToTransfer(item);
-                                  setItemSearch('');
-                                  setShowItemSearch(false);
                                 }}
                                 className="w-full text-left px-5 py-4 hover:bg-indigo-50 transition-colors flex justify-between items-center group"
                               >
@@ -811,24 +831,28 @@ const Transfers: React.FC = () => {
                             ))}
                           {filteredItems.length === 0 && (
                             <div className="p-8 text-center bg-slate-50/50">
-                              <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mb-4">No item found for "{itemSearch}"</p>
+                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-4">No results for "{itemSearch}"</p>
                               {isOpeningStock && (
                                 <button 
                                   onClick={() => {
-                                    setNewItemName(itemSearch);
                                     setIsQuickAddModalOpen(true);
+                                    setNewItemName(itemSearch);
                                   }}
-                                  className="mx-auto flex items-center justify-center gap-2 px-6 py-3 bg-indigo-100 text-indigo-700 rounded-xl text-xs font-black hover:bg-indigo-200 transition-all uppercase tracking-widest"
+                                  className="text-xs text-indigo-600 font-bold uppercase hover:underline"
                                 >
-                                  <Plus className="w-5 h-5" />
-                                  Add "{itemSearch}" as New Item
+                                  + Create New Item?
                                 </button>
-                              )}
-                              {!isOpeningStock && (
-                                <p className="text-[10px] text-slate-400 font-medium italic">Only items in stock can be transferred. Use 'Opening Stock' to add new items.</p>
                               )}
                             </div>
                           )}
+                          <div className="p-2 border-t border-slate-50 bg-slate-50/30 flex justify-center">
+                            <button
+                              onClick={() => { setShowItemSearch(false); setItemSearch(''); }}
+                              className="text-[10px] font-black uppercase text-indigo-600 hover:text-indigo-800 tracking-widest"
+                            >
+                              Done Adding Items
+                            </button>
+                          </div>
                         </motion.div>
                       )}
                     </motion.div>
@@ -1068,7 +1092,7 @@ const Transfers: React.FC = () => {
             </div>
           )}
         </AnimatePresence>
-      </div>
+      </motion.div>
     );
   }
 

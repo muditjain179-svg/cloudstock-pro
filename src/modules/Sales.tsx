@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { 
   collection, 
   onSnapshot, 
@@ -50,8 +50,8 @@ import { formatCurrency, generateInvoicePDF, generateWhatsAppLink, cn } from '..
 const Sales: React.FC = () => {
   const { user } = useAuth();
   
-  const { data: items } = useAppData<Item>('items', [orderBy('name')]);
-  const { data: customers } = useAppData<Customer>('customers', [orderBy('name')]);
+  const { data: items, isLoading: itemsLoading } = useAppData<Item>('items', [orderBy('name')]);
+  const { data: customers, isLoading: customersLoading } = useAppData<Customer>('customers', [orderBy('name')]);
 
   const [bills, setBills] = useState<Bill[]>([]);
   const [salesmanInventory, setSalesmanInventory] = useState<Record<string, number>>({});
@@ -69,7 +69,6 @@ const Sales: React.FC = () => {
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [lastFinalizedBill, setLastFinalizedBill] = useState<Bill | null>(null);
   const [customerSearch, setCustomerSearch] = useState('');
-  const [showRecoveryBanner, setShowRecoveryBanner] = useState(false);
 
   // Bill Form State
   const [billData, setBillData] = useState<{
@@ -96,11 +95,18 @@ const Sales: React.FC = () => {
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [viewingDraft, setViewingDraft] = useState<Bill | null>(null);
   const [isFinalizing, setIsFinalizing] = useState<Bill | null>(null);
+  const [inventoryLoaded, setInventoryLoaded] = useState(false);
+  const hasRestored = useRef(false);
   const addItemButtonRef = useRef<HTMLButtonElement>(null);
-  const inStockItems = useMemo(() => items.filter(i => {
-    const stock = user?.role === 'admin' ? i.mainStock : (salesmanInventory[i.id] || 0);
-    return (stock || 0) > 0;
-  }), [items, user, salesmanInventory]);
+  const inStockItems = useMemo(() => {
+    // While inventory is loading show all items so search is not empty
+    if (!inventoryLoaded && user?.role === 'salesman') return items;
+
+    return items.filter(i => {
+      const stock = user?.role === 'admin' ? i.mainStock : (salesmanInventory[i.id] || 0);
+      return (stock || 0) > 0;
+    });
+  }, [items, user, salesmanInventory, inventoryLoaded]);
 
   const itemFuse = useMemo(() => new Fuse(inStockItems, {
     keys: [
@@ -128,10 +134,47 @@ const Sales: React.FC = () => {
     );
   }, [customerSearch, customers]);
 
-  useEffect(() => {
-    if (!user) return;
+  const billsLoadedRef = useRef(false);
+  const userId = user?.id;
+  const userRole = user?.role;
 
-    loadInitialBills();
+  const loadInitialBills = useCallback(async () => {
+    if (!user) return;
+    setLoading(true);
+    const safetyTimer = setTimeout(() => setLoading(false), 30000);
+    try {
+      let q = query(
+        collection(db, 'bills'),
+        where('type', '==', 'sale'),
+        where('status', '==', 'finalized'),
+        orderBy('date', 'desc'),
+        limit(50)
+      );
+
+      if (user.role === 'salesman') {
+        q = query(q, where('createdBy', '==', user.id));
+      }
+
+      const snapshot = await getDocs(q);
+      const billsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill));
+      setActiveBills(billsData);
+      setLastVisibleActive(snapshot.docs[snapshot.docs.length - 1] || null);
+      setHasMoreActive(snapshot.docs.length === 50);
+    } catch (error) {
+      console.error("Error loading initial bills:", error);
+    } finally {
+      clearTimeout(safetyTimer);
+      setLoading(false);
+    }
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
+    if (!userId) return;
+
+    if (!billsLoadedRef.current) {
+      billsLoadedRef.current = true;
+      loadInitialBills();
+    }
 
     // Listen for NEW bills only
     const now = Timestamp.now();
@@ -143,8 +186,8 @@ const Sales: React.FC = () => {
       orderBy('date', 'desc')
     );
 
-    if (user.role === 'salesman') {
-      newBillsQ = query(newBillsQ, where('createdBy', '==', user.id));
+    if (userRole === 'salesman') {
+      newBillsQ = query(newBillsQ, where('createdBy', '==', userId));
     }
 
     const unsubNew = onSnapshot(newBillsQ, (snapshot) => {
@@ -163,9 +206,9 @@ const Sales: React.FC = () => {
     });
 
     // Listen for Draft Bills
-    const draftsQ = user.role === 'admin'
+    const draftsQ = userRole === 'admin'
       ? query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'draft'), orderBy('date', 'desc'), limit(50))
-      : query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'draft'), where('createdBy', '==', user.id), orderBy('date', 'desc'), limit(50));
+      : query(collection(db, 'bills'), where('type', '==', 'sale'), where('status', '==', 'draft'), where('createdBy', '==', userId), orderBy('date', 'desc'), limit(50));
 
     const unsubDrafts = onSnapshot(draftsQ, (snapshot) => {
       setDraftBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
@@ -175,18 +218,26 @@ const Sales: React.FC = () => {
 
     // Salesman inventory check
     let unsubInventory = () => {};
-    if (user.role === 'salesman') {
-      unsubInventory = onSnapshot(collection(db, `inventories/${user.id}/items`), (snapshot) => {
+    if (userRole === 'salesman') {
+      unsubInventory = onSnapshot(collection(db, `inventories/${userId}/items`), (snapshot) => {
         const inv: Record<string, number> = {};
         snapshot.docs.forEach(d => inv[d.id] = d.data().quantity);
         setSalesmanInventory(inv);
+        setInventoryLoaded(true);
       }, (error) => {
         console.error("Salesman inventory listener error:", error);
       });
+    } else if (userRole === 'admin') {
+      setInventoryLoaded(true);
     }
 
-    return () => { unsubNew(); unsubDrafts(); unsubInventory(); };
-  }, [user]);
+    return () => { 
+      unsubNew(); 
+      unsubDrafts(); 
+      unsubInventory(); 
+      billsLoadedRef.current = false;
+    };
+  }, [userId, userRole, loadInitialBills]);
 
   const ITEM_DOC_TIMEOUT = 10000;
   const GLOBAL_SUBMISSION_TIMEOUT = 30000;
@@ -231,8 +282,13 @@ const Sales: React.FC = () => {
 
   // Auto-restore form state
   useEffect(() => {
+    if (hasRestored.current || itemsLoading || customersLoading) return;
+
     const saved = localStorage.getItem('draft_sales_bill');
-    if (!saved) return;
+    if (!saved) {
+      hasRestored.current = true;
+      return;
+    }
 
     try {
       const formState = JSON.parse(saved);
@@ -241,27 +297,23 @@ const Sales: React.FC = () => {
       // Only restore if saved less than 24 hours ago
       if (age > 24 * 60 * 60 * 1000) {
         localStorage.removeItem('draft_sales_bill');
+        hasRestored.current = true;
         return;
       }
 
-      if (formState.items?.length > 0 || formState.customer) {
+      // ONLY restore if the form is currently empty (to avoid overwriting manual changes)
+      const isFormEmpty = billData.items.length === 0 && !billData.customer;
+      
+      if (isFormEmpty && (formState.items?.length > 0 || formState.customer)) {
         // Verify items and customer still exist
-        const validatedItems = formState.items.filter((bi: BillItem) => 
+        const validatedItems = (formState.items || []).filter((bi: BillItem) => 
           items.find(i => i.id === bi.itemId)
         );
         
-        if (validatedItems.length < formState.items.length) {
-          alert("Some items were removed from your restored bill as they no longer exist in inventory.");
-        }
-
         const validatedCustomer = formState.customer && customers.find(c => c.id === formState.customer.id) 
           ? formState.customer 
           : null;
         
-        if (formState.customer && !validatedCustomer) {
-          alert("Previously selected customer no longer exists. Please select again.");
-        }
-
         setBillData(prev => ({
           ...prev,
           items: validatedItems,
@@ -270,18 +322,20 @@ const Sales: React.FC = () => {
           receivedAmount: formState.receivedAmount ?? ''
         }));
         setBillDate(formState.billDate || new Date().toISOString().split('T')[0]);
-        setShowRecoveryBanner(true);
+        if (formState.editingDraftId) setEditingDraftId(formState.editingDraftId);
         setIsCreating(true);
       }
+      hasRestored.current = true;
     } catch (e) {
       console.error("Error restoring sales draft:", e);
       localStorage.removeItem('draft_sales_bill');
+      hasRestored.current = true;
     }
-  }, [items, customers]);
+  }, [itemsLoading, customersLoading, items, customers]);
 
   // Auto-save form state
   useEffect(() => {
-    if (!isCreating || isSaving || (billData.items.length === 0 && !billData.customer)) return;
+    if (!isCreating || isSaving || !hasRestored.current || (billData.items.length === 0 && !billData.customer)) return;
 
     const timeoutId = setTimeout(() => {
       try {
@@ -291,6 +345,7 @@ const Sales: React.FC = () => {
           oldDue: billData.oldDue,
           receivedAmount: billData.receivedAmount,
           billDate,
+          editingDraftId,
           savedAt: Date.now()
         };
         localStorage.setItem('draft_sales_bill', JSON.stringify(formState));
@@ -300,48 +355,21 @@ const Sales: React.FC = () => {
     }, 1000); // Debounce saves to once per second
 
     return () => clearTimeout(timeoutId);
-  }, [billData.items, billData.customer, billData.oldDue, billData.receivedAmount, billDate, isCreating]);
+  }, [billData.items, billData.customer, billData.oldDue, billData.receivedAmount, billDate, isCreating, editingDraftId, isSaving]);
 
   const resetForm = () => {
     setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
     setBillDate(new Date().toISOString().split('T')[0]);
     setIsCreating(false);
     setEditingDraftId(null);
-    setShowRecoveryBanner(false);
     localStorage.removeItem('draft_sales_bill');
   };
 
-  const loadInitialBills = async () => {
-    if (!user) return;
-    setLoading(true);
-    try {
-      let q = query(
-        collection(db, 'bills'),
-        where('type', '==', 'sale'),
-        where('status', '==', 'finalized'),
-        orderBy('date', 'desc'),
-        limit(50)
-      );
-
-      if (user.role === 'salesman') {
-        q = query(q, where('createdBy', '==', user.id));
-      }
-
-      const snapshot = await getDocs(q);
-      const billsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill));
-      setActiveBills(billsData);
-      setLastVisibleActive(snapshot.docs[snapshot.docs.length - 1] || null);
-      setHasMoreActive(snapshot.docs.length === 50);
-    } catch (error) {
-      console.error("Error loading initial bills:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const loadMoreBills = async () => {
     if (!user || !lastVisibleActive || isLoadingMore) return;
     setIsLoadingMore(true);
+    const safetyTimer = setTimeout(() => setIsLoadingMore(false), 30000);
     try {
       let q = query(
         collection(db, 'bills'),
@@ -364,6 +392,7 @@ const Sales: React.FC = () => {
     } catch (error) {
       console.error("Error loading more bills:", error);
     } finally {
+      clearTimeout(safetyTimer);
       setIsLoadingMore(false);
     }
   };
@@ -374,12 +403,25 @@ const Sales: React.FC = () => {
 
   const addItemToBill = (item: Item) => {
     const existing = billData.items.find(i => i.itemId === item.id);
-    if (existing) return;
-    const newItems = [...billData.items, { itemId: item.id, name: item.name, quantity: '' as any, price: '' as any }];
-    setBillData({
-      ...billData,
-      items: newItems
-    });
+    if (existing) {
+      // Show feedback instead of silently ignoring
+      setSubmissionError(`"${item.name}" is already in the bill. Update the quantity instead.`);
+      setTimeout(() => setSubmissionError(null), 3000);
+      // We no longer close search here
+      return;
+    }
+
+    setBillData(prev => ({
+      ...prev,
+      items: [...prev.items, { itemId: item.id, name: item.name, quantity: '' as any, price: '' as any }]
+    }));
+
+    // Reset search query but keep dropdown open
+    setItemSearch('');
+    // Re-focus search input
+    setTimeout(() => {
+      document.querySelector<HTMLInputElement>('.item-search-input')?.focus();
+    }, 50);
 
     // After adding new item row scroll to it
     setTimeout(() => {
@@ -391,25 +433,27 @@ const Sales: React.FC = () => {
   };
 
   const updateBillItem = (index: number, updates: Partial<BillItem>) => {
-    const newItems = [...billData.items];
-    const billItem = newItems[index];
+    setBillData(prev => {
+      const newItems = [...prev.items];
+      const billItem = newItems[index];
 
-    if (updates.quantity !== undefined) {
-      const stockItem = items.find(i => i.id === billItem.itemId);
-      const available = user?.role === 'admin' ? stockItem?.mainStock : (salesmanInventory[billItem.itemId] || 0);
-      
-      let safeQty: any = updates.quantity;
-      if (safeQty !== '') {
-        // Cap quantity at available stock
-        safeQty = Math.min(Number(safeQty), available || 0);
-        if (safeQty < 0) safeQty = 0;
+      if (updates.quantity !== undefined) {
+        const stockItem = items.find(i => i.id === billItem.itemId);
+        const available = user?.role === 'admin' ? stockItem?.mainStock : (salesmanInventory[billItem.itemId] || 0);
+        
+        let safeQty: any = updates.quantity;
+        if (safeQty !== '') {
+          // Cap quantity at available stock
+          safeQty = Math.min(Number(safeQty), available || 0);
+          if (safeQty < 0) safeQty = 0;
+        }
+        newItems[index] = { ...billItem, ...updates, quantity: safeQty };
+      } else {
+        newItems[index] = { ...billItem, ...updates };
       }
-      newItems[index] = { ...billItem, ...updates, quantity: safeQty };
-    } else {
-      newItems[index] = { ...billItem, ...updates };
-    }
-    
-    setBillData({ ...billData, items: newItems });
+      
+      return { ...prev, items: newItems };
+    });
   };
 
   const handleEditDraft = (draft: Bill) => {
@@ -840,7 +884,12 @@ const Sales: React.FC = () => {
   if (isCreating) {
     return (
       <>
-        <div className="space-y-6">
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.98, y: 10 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ duration: 0.2 }}
+          className="space-y-6"
+        >
         <div className="flex items-center gap-4">
           <button 
             onClick={resetForm} 
@@ -851,29 +900,6 @@ const Sales: React.FC = () => {
           </button>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{editingDraftId ? 'Edit Draft Bill' : 'New Sales Bill'}</h1>
         </div>
-
-        {showRecoveryBanner && (
-          <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 animate-in slide-in-from-top-2 duration-300">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center">
-                <Save className="w-4 h-4 text-amber-600" />
-              </div>
-              <div>
-                <p className="text-amber-900 text-sm font-bold tracking-tight">Bill Restored</p>
-                <p className="text-amber-700 text-xs font-medium">We found and recovered your unsaved bill data.</p>
-              </div>
-            </div>
-            <button
-              onClick={() => {
-                resetForm();
-                setShowRecoveryBanner(false);
-              }}
-              className="px-4 py-2 bg-amber-600/10 text-amber-700 text-xs font-bold rounded-lg hover:bg-amber-600/20 transition-colors uppercase tracking-wider"
-            >
-              Discard
-            </button>
-          </div>
-        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">
@@ -981,7 +1007,7 @@ const Sales: React.FC = () => {
                         />
                       </div>
                       <button 
-                        onClick={() => setBillData({ ...billData, items: billData.items.filter((_, i) => i !== idx) })}
+                        onClick={() => setBillData(prev => ({ ...prev, items: prev.items.filter((_, i) => i !== idx) }))}
                         className="mt-5 p-2.5 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors sm:mt-5"
                       >
                         <Trash2 className="w-5 h-5" />
@@ -1019,7 +1045,7 @@ const Sales: React.FC = () => {
                           placeholder="Search by name, brand, category..."
                           value={itemSearch}
                           onChange={(e) => setItemSearch(e.target.value)}
-                          className="w-full pl-12 pr-16 py-4 bg-slate-50 border-2 border-indigo-100 rounded-2xl focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none text-sm font-bold placeholder:text-slate-400 transition-all uppercase tracking-tight"
+                          className="item-search-input w-full pl-12 pr-12 py-4 bg-slate-50 border-2 border-indigo-100 rounded-2xl focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none text-sm font-bold placeholder:text-slate-400 transition-all uppercase tracking-tight"
                         />
                         <button 
                           onClick={() => { setShowItemSearch(false); setItemSearch(''); }}
@@ -1029,6 +1055,12 @@ const Sales: React.FC = () => {
                           <X className="w-4 h-4" />
                         </button>
                       </div>
+
+                      {!inventoryLoaded && user?.role === 'salesman' && (
+                        <p className="text-[10px] text-amber-500 px-3 py-1 font-bold animate-pulse">
+                          Loading your inventory...
+                        </p>
+                      )}
 
                       <motion.div 
                         initial={{ opacity: 0, y: 10 }}
@@ -1040,8 +1072,6 @@ const Sales: React.FC = () => {
                             key={item.id}
                             onClick={() => {
                               addItemToBill(item);
-                              setItemSearch('');
-                              setShowItemSearch(false);
                             }}
                             className="w-full text-left px-5 py-4 hover:bg-indigo-50 transition-colors flex justify-between items-center group"
                           >
@@ -1062,6 +1092,14 @@ const Sales: React.FC = () => {
                             <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">No matching items in stock</p>
                           </div>
                         )}
+                        <div className="p-2 border-t border-slate-50 bg-slate-50/30 flex justify-center">
+                          <button
+                            onClick={() => { setShowItemSearch(false); setItemSearch(''); }}
+                            className="text-[10px] font-black uppercase text-indigo-600 hover:text-indigo-800 tracking-widest"
+                          >
+                            Done Adding Items
+                          </button>
+                        </div>
                       </motion.div>
                     </motion.div>
                   )}
@@ -1161,7 +1199,7 @@ const Sales: React.FC = () => {
               </div>
             </div>
           </div>
-        </div>
+        </motion.div>
 
         {/* New Customer Modal */}
         <AnimatePresence>

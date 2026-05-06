@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
   collection, 
   onSnapshot, 
@@ -15,56 +15,67 @@ import { loadFromIndexedDB } from './indexedDB';
  * 2. IndexedDB (Persistent between sessions)
  * 3. Firebase Firestore (Real-time truth)
  */
-export function useAppData<T = any>(collectionName: string, queryConstraints: QueryConstraint[] = []) {
-  const [data, setData] = useState<T[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+export function useAppData<T = any>(
+  collectionName: string, 
+  queryConstraints: QueryConstraint[] = []
+) {
+  // Store constraints in a ref on first render (or when collectionName changes)
+  // to avoid effect re-runs when passed inline arrays like useAppData('items', [orderBy('name')])
+  const constraintsRef = useRef(queryConstraints);
+  const prevCollectionName = useRef(collectionName);
 
-  // Memoize the query based on collection name and parameters
-  // Note: We assume queryConstraints are relatively stable or handled by the caller
-  const q = useMemo(() => {
-    return query(collection(db, collectionName), ...queryConstraints);
-  }, [collectionName, ...queryConstraints]);
+  if (prevCollectionName.current !== collectionName) {
+    constraintsRef.current = queryConstraints;
+    prevCollectionName.current = collectionName;
+  }
+
+  // Stable cache key
+  const cacheKey = collectionName;
+
+  const [data, setData] = useState<T[]>(() => {
+    if (isCacheFresh(cacheKey)) {
+      return (getCache(cacheKey) as T[]) || [];
+    }
+    return [];
+  });
+  const [isLoading, setIsLoading] = useState(!isCacheFresh(cacheKey));
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let unsub: (() => void) | null = null;
     let isMounted = true;
 
     async function initialize() {
-      // Priority 1: Check RAM Cache for instant load
-      if (isCacheFresh(collectionName)) {
-        const cachedData = getCache(collectionName);
-        if (cachedData && isMounted) {
-          setData(cachedData as T[]);
+      // 1. RAM Cache (Instant)
+      if (isCacheFresh(cacheKey)) {
+        const cached = getCache(cacheKey);
+        if (cached && isMounted) {
+          setData(cached as T[]);
           setIsLoading(false);
         }
       } else {
-        // Priority 2: Check IndexedDB while Firebase fetches
-        const idbData = await loadFromIndexedDB(collectionName);
+        // 2. IndexedDB (Persistent)
+        const idbData = await loadFromIndexedDB(cacheKey);
         if (idbData && isMounted) {
           setData(idbData as T[]);
           setIsLoading(false);
         }
       }
 
-      // Priority 3: Firebase real-time listener (always runs to ensure sync)
+      // 3. Firebase (Real-time Truth)
+      const q = query(collection(db, collectionName), ...constraintsRef.current);
+      
       unsub = onSnapshot(q, (snapshot) => {
-        const freshData = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        })) as T[];
-
+        const freshData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as T[];
         if (isMounted) {
           setData(freshData);
-          setCache(collectionName, freshData);
+          setCache(cacheKey, freshData);
           setIsLoading(false);
           setError(null);
         }
       }, (err) => {
-        console.error(`Firebase error [${collectionName}]:`, err);
+        console.error(`useAppData Error [${collectionName}]:`, err);
         if (isMounted) {
-          // If we have cached data, we don't necessarily want to show a big error
-          // but we save it in state just in case.
           setError(err.message);
           setIsLoading(false);
         }
@@ -77,7 +88,7 @@ export function useAppData<T = any>(collectionName: string, queryConstraints: Qu
       isMounted = false;
       if (unsub) unsub();
     };
-  }, [q, collectionName]);
+  }, [collectionName]);
 
   return { data, isLoading, error };
 }

@@ -32,6 +32,7 @@ const Customers: React.FC = () => {
     e.preventDefault();
     if (isSubmitting) return;
     setIsSubmitting(true);
+    const safetyTimer = setTimeout(() => setIsSubmitting(false), 30000);
     try {
       if (editingCustomer) {
         await updateDoc(doc(db, 'customers', editingCustomer.id), formData);
@@ -42,9 +43,11 @@ const Customers: React.FC = () => {
       setModalOpen(false);
       setEditingCustomer(null);
       setFormData({ name: '', phone: '' });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error saving customer:", error);
+      alert("Error saving customer: " + (error.message || "An unknown error occurred"));
     } finally {
+      clearTimeout(safetyTimer);
       setIsSubmitting(false);
     }
   };

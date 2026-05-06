@@ -32,6 +32,7 @@ const Categories: React.FC = () => {
     e.preventDefault();
     if (isSubmitting) return;
     setIsSubmitting(true);
+    const safetyTimer = setTimeout(() => setIsSubmitting(false), 30000);
     try {
       if (editingCategory) {
         await updateDoc(doc(db, 'categories', editingCategory.id), formData);
@@ -42,9 +43,11 @@ const Categories: React.FC = () => {
       setModalOpen(false);
       setEditingCategory(null);
       setFormData({ name: '' });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error saving category:", error);
+      alert("Error saving category: " + (error.message || "An unknown error occurred"));
     } finally {
+      clearTimeout(safetyTimer);
       setIsSubmitting(false);
     }
   };

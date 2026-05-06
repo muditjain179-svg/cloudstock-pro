@@ -90,6 +90,7 @@ const Staff: React.FC = () => {
     e.preventDefault();
     setIsCreating(true);
     setCreateError(null);
+    const safetyTimer = setTimeout(() => setIsCreating(false), 30000);
 
     const appName = `SecondaryApp-${Date.now()}`;
     const secondaryApp = initializeApp(firebaseConfig, appName);
@@ -111,7 +112,7 @@ const Staff: React.FC = () => {
       try {
         await setDoc(doc(db, 'users', uid), profile);
       } catch (error: any) {
-        handleFirestoreError(error, 'write', `users/${uid}`);
+        handleFirestoreError(error, 'write' as any, `users/${uid}`);
       }
 
       // 3. Cleanup secondary session
@@ -133,6 +134,7 @@ const Staff: React.FC = () => {
       }
     } finally {
       // Ensure app is cleaned up always
+      clearTimeout(safetyTimer);
       try { await deleteApp(secondaryApp); } catch(e) {}
       setIsCreating(false);
     }

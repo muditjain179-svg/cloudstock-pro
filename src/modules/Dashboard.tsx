@@ -71,20 +71,29 @@ const Dashboard: React.FC = () => {
     if (user.role === 'salesman') {
       const invRef = collection(db, `inventories/${user.id}/items`);
       unsubSalesmanInv = onSnapshot(invRef, (snapshot) => {
-        const invData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const invData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
         let totalQty = 0;
         const lowStock: any[] = [];
         
-        invData.forEach((item: any) => {
-          totalQty += item.quantity || 0;
-          if (item.quantity <= 2) { // Default low stock for salesman
-            lowStock.push({ name: 'Stock Item', id: item.id, mainStock: item.quantity, lowStockThreshold: 2 });
+        invData.forEach((invItem: any) => {
+          totalQty += invItem.quantity || 0;
+          // Join with items catalog for name and real threshold
+          const catalogItem = items.find(i => i.id === invItem.id);
+          const threshold = catalogItem?.lowStockThreshold || 5;
+          
+          if ((invItem.quantity || 0) <= threshold) {
+            lowStock.push({ 
+              id: invItem.id,
+              name: catalogItem?.name || invItem.itemName || 'Stock Item',
+              brand: catalogItem?.brand || invItem.brand || '',
+              mainStock: invItem.quantity,
+              lowStockThreshold: threshold 
+            });
           }
         });
         
+        setLowStockItems(lowStock);
         setStats(prev => ({ ...prev, mainStock: totalQty, lowStockCount: lowStock.length }));
-        // Note: For item names in low stock alerts, we'd need the items catalog. 
-        // We'll just update the numeric stats for now to keep it responsive.
       });
     }
 
