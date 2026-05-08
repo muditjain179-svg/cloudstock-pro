@@ -30,7 +30,13 @@ export function useAppData<T = any>(
   }
 
   // Stable cache key
-  const cacheKey = collectionName;
+  const cacheKey = constraintsRef.current.length > 0
+    ? `${collectionName}_${constraintsRef.current
+        .map(c => JSON.stringify(c))
+        .join('|')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .slice(0, 50)}`
+    : collectionName;
 
   const [data, setData] = useState<T[]>(() => {
     if (isCacheFresh(cacheKey)) {

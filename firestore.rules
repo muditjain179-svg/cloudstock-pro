@@ -40,10 +40,8 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Connectivity test
-    match /_connection_test_/{testId} {
-      allow read: if true;
-    }
+    // IMPORTANT: After editing publish rules in Firebase Console
+    // Firestore Database → Rules → Paste → Publish
 
     // Users
     match /users/{userId} {

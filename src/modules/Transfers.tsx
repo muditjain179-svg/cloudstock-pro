@@ -80,7 +80,7 @@ const Transfers: React.FC = () => {
   });
 
   const itemFuse = useMemo(() => new Fuse(
-    isOpeningStock ? items : items.filter(i => i.mainStock > 0),
+    isOpeningStock ? items : items.filter(i => i.isExtra || i.mainStock > 0),
     {
       keys: [
         { name: 'name', weight: 0.6 },
@@ -96,7 +96,7 @@ const Transfers: React.FC = () => {
   ), [items, isOpeningStock]);
 
   const filteredItems = useMemo(() => {
-    const baseItems = isOpeningStock ? items : items.filter(i => i.mainStock > 0);
+    const baseItems = isOpeningStock ? items : items.filter(i => i.isExtra || i.mainStock > 0);
     if (!itemSearch.trim()) return baseItems;
     return itemFuse.search(itemSearch).map(result => result.item);
   }, [itemSearch, itemFuse, items, isOpeningStock]);
@@ -119,7 +119,7 @@ const Transfers: React.FC = () => {
     const unsubBills = onSnapshot(billsQ, (snapshot) => {
       setBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
     }, (error) => {
-      console.error("Transfers bills listener error:", error);
+      if (import.meta.env.DEV) console.error("Transfers bills listener error:", error);
     });
 
     return () => { 
@@ -146,13 +146,12 @@ const Transfers: React.FC = () => {
     const safetyTimer = setTimeout(() => {
       setIsSaving(false);
       setSubmissionError(`The ${actionName} operation timed out. Please check your connection and try again.`);
-      alert(`The ${actionName} operation timed out. Please check your connection and try again.`);
     }, GLOBAL_SUBMISSION_TIMEOUT);
 
     try {
       await action();
     } catch (error: any) {
-      console.error(`Error during ${actionName}:`, error);
+      if (import.meta.env.DEV) console.error(`Error during ${actionName}:`, error);
       let message = error.message || `An error occurred during ${actionName}`;
       if (error.code === 'unavailable') {
         message = 'No internet connection. Please check your network and try again.';
@@ -162,7 +161,6 @@ const Transfers: React.FC = () => {
         message = 'Request timed out. Please try again.';
       }
       setSubmissionError(message);
-      alert(message);
     } finally {
       clearTimeout(safetyTimer);
       setIsSaving(false);
@@ -211,7 +209,7 @@ const Transfers: React.FC = () => {
           return true;
         }
       } catch (e) {
-        console.error(`Error restoring ${type} draft:`, e);
+      if (import.meta.env.DEV) console.error(`Error restoring ${type} draft:`, e);
         localStorage.removeItem(`draft_${type}`);
       }
       return false;
@@ -248,12 +246,18 @@ const Transfers: React.FC = () => {
         };
         localStorage.setItem(`draft_${type}`, JSON.stringify(formState));
       } catch (e) {
-        console.warn("Failed to auto-save transfer draft:", e);
+        // console.warn("Failed to auto-save transfer draft:", e);
       }
     }, 1000);
 
     return () => clearTimeout(timeoutId);
   }, [billData.items, billData.salesman, billDate, isCreating, isOpeningStock, isSaving]);
+
+  useEffect(() => {
+    if (!submissionError) return;
+    const timer = setTimeout(() => setSubmissionError(null), 10000);
+    return () => clearTimeout(timer);
+  }, [submissionError]);
 
   const resetForm = () => {
     const type = isOpeningStock ? 'opening_stock' : 'transfer';
@@ -266,16 +270,16 @@ const Transfers: React.FC = () => {
 
   const handleTransfer = async () => {
     if (!billData.salesman) {
-      alert("Please select a salesman");
+      setSubmissionError("Please select a salesman");
       return;
     }
     if (billData.items.length === 0) {
-      alert("Please add at least one item");
+      setSubmissionError("Please add at least one item");
       return;
     }
     const invalidItems = billData.items.some(i => i.quantity === '' || Number(i.quantity) <= 0);
     if (invalidItems) {
-      alert("Please ensure all items have a valid quantity");
+      setSubmissionError("Please ensure all items have a valid quantity");
       return;
     }
     if (!user || isSaving) return;
@@ -286,7 +290,7 @@ const Transfers: React.FC = () => {
     minD.setDate(minD.getDate() - 7);
     const minStr = minD.toISOString().split('T')[0];
     if (billDate > todayStr || billDate < minStr) {
-      alert("Invalid date. You can only pick dates from today up to 7 days back.");
+      setSubmissionError("Invalid date. You can only pick dates from today up to 7 days back.");
       return;
     }
 
@@ -306,7 +310,8 @@ const Transfers: React.FC = () => {
           items: billData.items.map(i => ({
             item_name: i.name,
             qty: i.quantity,
-            brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-'
+            brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-',
+            is_extra: i.isExtra
           }))
         });
         const url = URL.createObjectURL(blob);
@@ -324,12 +329,15 @@ const Transfers: React.FC = () => {
         qty: number,
         itemId?: string,
         itemName?: string,
-        brand?: string
+        brand?: string,
+        isExtra?: boolean
       }> = [];
 
       for (const billItem of billData.items) {
-        // 1. Decrease Main Stock (Only if NOT opening stock)
-        if (!isOpeningStock) {
+        const isEx = !!billItem.isExtra;
+        
+        // 1. Decrease Main Stock (Only if NOT opening stock AND NOT extra)
+        if (!isOpeningStock && !isEx) {
           const itemRef = doc(db, 'items', billItem.itemId);
           const itemDoc = await checkDocWithTimeout(itemRef);
           const currentMainStock = itemDoc.data()?.mainStock || 0;
@@ -348,20 +356,19 @@ const Transfers: React.FC = () => {
           qty: billItem.quantity,
           itemId: billItem.itemId,
           itemName: billItem.name,
-          brand: (billItem as any).brand
+          brand: (billItem as any).brand,
+          isExtra: isEx
         });
       }
 
       const batch = writeBatch(db);
 
       // Writes
-      if (!isOpeningStock) {
-        for (const update of itemUpdates) {
-          batch.update(update.ref, { 
-            mainStock: increment(-update.qty),
-            updatedAt: serverTimestamp()
-          });
-        }
+      for (const update of itemUpdates) {
+        batch.update(update.ref, { 
+          mainStock: increment(-update.qty),
+          updatedAt: serverTimestamp()
+        });
       }
       for (const update of salesmanUpdates) {
         const payload: any = { 
@@ -369,10 +376,12 @@ const Transfers: React.FC = () => {
           lastUpdated: serverTimestamp()
         };
         
+        if (update.isExtra) payload.isExtra = true;
+
         if (isOpeningStock) {
-          payload.itemId = (update as any).itemId;
-          payload.itemName = (update as any).itemName;
-          payload.brand = (update as any).brand;
+          payload.itemId = update.itemId;
+          payload.itemName = update.itemName;
+          payload.brand = update.brand;
           payload.openingStock = increment(update.qty);
           payload.addedAt = serverTimestamp();
         }
@@ -429,7 +438,8 @@ const Transfers: React.FC = () => {
           items: (createdBill as Bill).items.map(i => ({
             item_name: i.name,
             qty: i.quantity,
-            brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-'
+            brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-',
+            is_extra: i.isExtra
           }))
         });
 
@@ -458,7 +468,8 @@ const Transfers: React.FC = () => {
        items: bill.items.map(i => ({
          item_name: i.name,
          qty: i.quantity,
-         brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-'
+         brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-',
+         is_extra: i.isExtra
        }))
      });
      
@@ -489,15 +500,15 @@ const Transfers: React.FC = () => {
 
   const handleQuickAddItem = async () => {
     if (!newItemName.trim()) {
-      alert("Item name is required");
+      setSubmissionError("Item name is required");
       return;
     }
     if (!newItemCategory) {
-      alert("Please select a category");
+      setSubmissionError("Please select a category");
       return;
     }
     if (!newItemBrand) {
-      alert("Please select a brand");
+      setSubmissionError("Please select a brand");
       return;
     }
 
@@ -506,7 +517,7 @@ const Transfers: React.FC = () => {
     );
 
     if (isDuplicate) {
-      alert("An item with this name already exists. Please search for it instead.");
+      setSubmissionError("An item with this name already exists. Please search for it instead.");
       return;
     }
 
@@ -538,7 +549,6 @@ const Transfers: React.FC = () => {
       setNewItemName('');
       setNewItemCategory('');
       setNewItemBrand('');
-      setShowItemSearch(false);
       setItemSearch('');
 
       setTimeout(() => {
@@ -548,7 +558,7 @@ const Transfers: React.FC = () => {
         }
       }, 300);
 
-      alert("Item created! Now enter the opening stock quantity.");
+      // alert("Item created! Now enter the opening stock quantity.");
     }, "creating item");
   };
 
@@ -564,7 +574,8 @@ const Transfers: React.FC = () => {
       items: bill.items.map(i => ({
         item_name: i.name,
         qty: i.quantity,
-        brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-'
+        brand: (i as any).brand || items.find(item => item.id === i.itemId)?.brand || '-',
+        is_extra: i.isExtra
       }))
     });
     
@@ -574,10 +585,9 @@ const Transfers: React.FC = () => {
     link.click();
   };
 
-  const handleDeleteBill = async (bill: Bill) => {
-    const confirmed = window.confirm(`Are you sure you want to delete transfer #${bill.billNumber}? Stock will be returned to main inventory from salesman.`);
-    if (!confirmed) return;
+  const [billToDelete, setBillToDelete] = useState<Bill | null>(null);
 
+  const proceedDeleteBill = async (bill: Bill) => {
     handleAsyncAction(async () => {
       await runTransaction(db, async (transaction) => {
         const billRef = doc(db, 'bills', bill.id);
@@ -623,6 +633,10 @@ const Transfers: React.FC = () => {
     }, "deleting transfer");
   };
 
+  const handleDeleteBill = (bill: Bill) => {
+    setBillToDelete(bill);
+  };
+
   const addItemToTransfer = (item: Item) => {
     const existing = billData.items.find(i => i.itemId === item.id);
     if (existing) {
@@ -640,8 +654,9 @@ const Transfers: React.FC = () => {
         quantity: '' as any, 
         price: 0,
         brand: item.brand,
+        isExtra: !!item.isExtra,
         newItemCreated: (item as any).createdVia === 'opening_stock'
-      } as any]
+      }]
     }));
 
     // Reset search query but keep dropdown open
@@ -722,40 +737,50 @@ const Transfers: React.FC = () => {
 
               <div className="space-y-4">
                 {billData.items.map((item, idx) => (
-                  <div key={item.itemId} className="flex flex-col sm:flex-row items-start sm:items-center gap-4 p-4 bg-slate-50 border border-slate-100 rounded-xl">
+                  <div key={item.itemId} className={cn(
+                    "flex flex-col sm:flex-row items-start sm:items-center gap-4 p-4 border rounded-xl transition-colors",
+                    item.isExtra ? "bg-amber-50 border-amber-100" : "bg-slate-50 border-slate-100"
+                  )}>
                     <div className="flex-1 w-full">
-                      <p className="font-bold text-slate-900">{item.name}</p>
+                      <div className="flex items-center gap-2">
+                        <p className="font-bold text-slate-900">{item.name}</p>
+                        {item.isExtra && (
+                          <span className="text-[7px] px-1 py-0.5 bg-amber-100 text-amber-700 border border-amber-200 rounded font-black tracking-widest uppercase">Extra</span>
+                        )}
+                      </div>
                       <p className="text-[10px] text-slate-400 uppercase font-bold">
-                        Main Stock: {items.find(i => i.id === item.itemId)?.mainStock || 0}
+                        {item.isExtra ? 'No main stock tracking' : `Main Stock: ${items.find(i => i.id === item.itemId)?.mainStock || 0}`}
                       </p>
                     </div>
                     <div className="flex items-center gap-3 w-full sm:w-auto">
-                      <div className="w-24">
-                        <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Qty</label>
-                        <input 
-                          type="number" 
-                          value={item.quantity} 
-                          min="1"
-                          max={isOpeningStock ? undefined : (items.find(i => i.id === item.itemId)?.mainStock || 0)}
-                          onChange={e => {
-                            const newItems = [...billData.items];
-                            const val = e.target.value;
-                            if (val === '') {
-                              newItems[idx].quantity = '' as any;
-                            } else {
-                              const qty = parseInt(val) || 0;
-                              if (!isOpeningStock) {
-                                const available = items.find(i => i.id === item.itemId)?.mainStock || 0;
-                                newItems[idx].quantity = Math.min(qty, available);
-                              } else {
-                                newItems[idx].quantity = qty;
-                              }
-                            }
-                            setBillData({...billData, items: newItems});
-                          }}
-                          className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
-                        />
-                      </div>
+                          <div className="w-24">
+                            <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Qty</label>
+                            <input 
+                              type="number" 
+                              value={item.quantity} 
+                              min="0"
+                              max={(isOpeningStock || item.isExtra) ? undefined : (items.find(i => i.id === item.itemId)?.mainStock || 0)}
+                              onChange={e => {
+                                const newItems = [...billData.items];
+                                const val = e.target.value;
+                                if (val === '') {
+                                  newItems[idx].quantity = '' as any;
+                                } else {
+                                  const qty = val === '' ? '' : parseInt(val);
+                                  const isExtra = !!item.isExtra;
+                                  
+                                  if (qty !== '' && !isOpeningStock && !isExtra) {
+                                    const available = items.find(i => i.id === item.itemId)?.mainStock || 0;
+                                    newItems[idx].quantity = Math.min(qty as number, available);
+                                  } else {
+                                    newItems[idx].quantity = qty;
+                                  }
+                                }
+                                setBillData({...billData, items: newItems});
+                              }}
+                              className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                            />
+                          </div>
                       <button 
                         onClick={() => setBillData({...billData, items: billData.items.filter((_, i) => i !== idx)})} 
                         className="mt-5 p-2.5 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors"
@@ -811,21 +836,35 @@ const Transfers: React.FC = () => {
                           animate={{ opacity: 1, y: 0 }}
                           className="absolute z-50 w-full mt-2 bg-white border border-slate-100 rounded-2xl shadow-2xl overflow-hidden max-h-64 overflow-y-auto"
                         >
-                          {filteredItems.map(item => (
+                           {filteredItems.map(item => (
                               <button
                                 key={item.id}
                                 onClick={() => {
                                   addItemToTransfer(item);
                                 }}
-                                className="w-full text-left px-5 py-4 hover:bg-indigo-50 transition-colors flex justify-between items-center group"
+                                className={cn(
+                                  "w-full text-left px-5 py-4 transition-colors flex justify-between items-center group",
+                                  item.isExtra ? "hover:bg-amber-50" : "hover:bg-indigo-50"
+                                )}
                               >
                                 <div>
-                                  <p className="font-bold text-slate-900 group-hover:text-indigo-700">{item.name}</p>
+                                  <div className="flex items-center gap-2">
+                                    <p className="font-bold text-slate-900 group-hover:text-indigo-700">{item.name}</p>
+                                    {item.isExtra && (
+                                      <span className="text-[7px] px-1 py-0.5 bg-amber-100 text-amber-700 border border-amber-200 rounded font-black tracking-widest uppercase">Extra</span>
+                                    )}
+                                  </div>
                                   <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">{item.brand} • {item.category}</p>
                                 </div>
                                 <div className="text-right">
-                                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Current Main Stock</p>
-                                  <p className="text-base font-black text-indigo-600">{item.mainStock}</p>
+                                  {item.isExtra ? (
+                                    <p className="text-[10px] text-amber-600 font-black uppercase tracking-tighter italic">Extra Item</p>
+                                  ) : (
+                                    <>
+                                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Current Main Stock</p>
+                                      <p className="text-base font-black text-indigo-600">{item.mainStock}</p>
+                                    </>
+                                  )}
                                 </div>
                               </button>
                             ))}
@@ -1144,26 +1183,48 @@ const Transfers: React.FC = () => {
               </div>
             </div>
             <div className="flex gap-1">
-              <button 
-                onClick={() => downloadTransferPDF(bill)} 
-                className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                title="Download Receipt"
-              >
-                <Download className="w-4 h-4" />
-              </button>
-              <button 
-                onClick={() => shareTransferPDF(bill)} 
-                className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                title="Share Receipt"
-              >
-                <Send className="w-4 h-4" />
-              </button>
-              <button 
-                onClick={() => handleDeleteBill(bill)} 
-                className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+              {billToDelete?.id === bill.id ? (
+                <div className="flex items-center gap-2 bg-red-50 p-1.5 rounded-lg border border-red-100 animate-in fade-in slide-in-from-right-1 duration-200">
+                  <span className="text-[8px] font-black text-red-600 uppercase tracking-tighter ml-1">Delete?</span>
+                  <div className="flex gap-1">
+                    <button 
+                      onClick={() => setBillToDelete(null)}
+                      className="px-2 py-1 bg-white border border-red-100 text-red-600 text-[8px] rounded font-black uppercase"
+                    >
+                      No
+                    </button>
+                    <button 
+                      onClick={() => { proceedDeleteBill(bill); setBillToDelete(null); }}
+                      className="px-2 py-1 bg-red-600 text-white text-[8px] rounded font-black uppercase shadow-sm"
+                    >
+                      Yes
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <button 
+                    onClick={() => downloadTransferPDF(bill)} 
+                    className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                    title="Download Receipt"
+                  >
+                    <Download className="w-4 h-4" />
+                  </button>
+                  <button 
+                    onClick={() => shareTransferPDF(bill)} 
+                    className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                    title="Share Receipt"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                  <button 
+                    onClick={() => handleDeleteBill(bill)} 
+                    className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </>
+              )}
             </div>
           </div>
         ))}

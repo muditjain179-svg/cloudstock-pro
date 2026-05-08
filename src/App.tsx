@@ -72,26 +72,35 @@ const MainLayout: React.FC = () => {
     };
   }, []);
 
-  useEffect(() => {
-    if (!user) return;
-    
-    let unsub: () => void;
+  const userId = user?.id;
+  const userRole = user?.role;
 
-    if (user.role === 'admin') {
+  useEffect(() => {
+    if (!userId || !userRole) return;
+    
+    let unsub: (() => void) | undefined;
+
+    if (userRole === 'admin') {
       unsub = onSnapshot(collection(db, 'items'), (snapshot) => {
         const items = snapshot.docs.map(doc => doc.data());
         const low = items.filter(i => (i.mainStock || 0) < (i.lowStockThreshold || 5)).length;
         setLowStockCount(low);
+      }, (error) => {
+        if (import.meta.env.DEV) console.error('Low stock listener error:', error);
       });
     } else {
-      unsub = onSnapshot(collection(db, `inventories/${user.id}/items`), (snapshot) => {
+      unsub = onSnapshot(collection(db, `inventories/${userId}/items`), (snapshot) => {
         const salesmanItems = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setLowStockCount(salesmanItems.filter((i: any) => (i.quantity || 0) <= (i.lowStockThreshold || 5)).length);
+      }, (error) => {
+        if (import.meta.env.DEV) console.error('Salesman inventory listener error:', error);
       });
     }
     
-    return () => unsub && unsub();
-  }, [user]);
+    return () => {
+      if (unsub) unsub();
+    };
+  }, [userId, userRole]);
 
   const navItems = [
     { label: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['admin', 'salesman'] },
@@ -242,12 +251,12 @@ const Login: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (user) navigate('/');
-  }, [user, navigate]);
+    if (user?.id) navigate('/');
+  }, [user?.id, navigate]);
 
   useEffect(() => {
-    if (authError) setError(authError);
-  }, [authError]);
+    if (authError) setError(authError?.message ?? String(authError));
+  }, [authError?.message ?? String(authError)]);
 
   const getErrorMessage = (code: string) => {
     switch (code) {
@@ -284,7 +293,7 @@ const Login: React.FC = () => {
         await signInWithEmail(email, password);
       }
     } catch (err: any) {
-      console.error("Login attempt error:", err);
+      if (import.meta.env.DEV) console.error("Login attempt error:", err);
       setError(getErrorMessage(err.code));
     } finally {
       setIsSubmitting(false);

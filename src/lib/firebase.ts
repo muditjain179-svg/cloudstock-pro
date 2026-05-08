@@ -22,10 +22,10 @@ const db = initializeFirestore(app, {
 enableMultiTabIndexedDbPersistence(db).catch((err) => {
     if (err.code === 'failed-precondition') {
         // Multiple tabs open, persistence can only be enabled in one tab at a a time.
-        console.warn('Firestore persistence failed: Multiple tabs open');
+        if (import.meta.env.DEV) console.warn('Firestore persistence failed: Multiple tabs open');
     } else if (err.code === 'unimplemented') {
         // The current browser does not support all of the features required to enable persistence
-        console.warn('Firestore persistence failed: Browser not supported');
+        if (import.meta.env.DEV) console.warn('Firestore persistence failed: Browser not supported');
     }
 });
 
@@ -73,12 +73,12 @@ export const handleFirestoreError = (error: any, operationType: FirestoreErrorIn
 async function testConnection() {
   try {
     await getDocFromServer(doc(db, '_connection_test_', 'test'));
-    console.log("Firebase connection successful.");
+    if (import.meta.env.DEV) console.log("Firebase connection successful.");
   } catch (error) {
     if (error instanceof Error && (error.message.includes('the client is offline') || error.message.includes('unavailable'))) {
-      console.error("Firebase is offline or unreachable. Please check your project setup.");
+      if (import.meta.env.DEV) console.error("Firebase is offline or unreachable. Please check your project setup.");
     } else {
-      console.warn("Non-critical Firebase connection check result:", error);
+      if (import.meta.env.DEV) console.warn("Non-critical Firebase connection check result:", error);
     }
   }
 }

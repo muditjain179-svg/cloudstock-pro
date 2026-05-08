@@ -51,7 +51,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               setUser(profile);
             } else {
               // For other users, if profile doesn't exist, it means setup is incomplete
-              console.warn('User profile not found in Firestore for uid:', firebaseUser.uid);
+              if (import.meta.env.DEV) console.warn('User profile not found in Firestore for uid:', firebaseUser.uid);
               setAuthError('Account setup incomplete. Contact your admin.');
               await signOut(auth);
               setUser(null);
@@ -61,7 +61,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setUser(null);
         }
       } catch (error: any) {
-        console.error("Auth initialization error:", error);
+        if (import.meta.env.DEV) console.error("Auth initialization error:", error);
         setAuthError('Failed to load profile. Please try again.');
         await signOut(auth);
         setUser(null);

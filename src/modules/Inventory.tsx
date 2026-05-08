@@ -61,15 +61,48 @@ const Inventory: React.FC = () => {
   const [isModalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [showToast, setShowToast] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [deleteItemId, setDeleteItemId] = useState<string | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   
   // Stock Breakdown Modal
-  const [isDetailsOpen, setIsDetailsOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'main' | 'extras'>('main');
+  const [showConvertModal, setShowConvertModal] = useState(false);
+  const [convertOpeningStock, setConvertOpeningStock] = useState<number | ''>('');
+  const [itemToConvert, setItemToConvert] = useState<Item | null>(null);
+
   const [detailsItem, setDetailsItem] = useState<Item | null>(null);
-  const [itemStockBreakdown, setItemStockBreakdown] = useState<Array<{ salesman: string, quantity: number }>>([]);
+  const [isDetailsOpen, setIsDetailsOpen] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
+  const [itemStockBreakdown, setItemStockBreakdown] = useState<Array<{ salesmanName: string, quantity: number }>>([]);
+
+  const mainItemsCount = useMemo(() => items.filter(i => !i.isExtra).length, [items]);
+  const extrasCount = useMemo(() => items.filter(i => i.isExtra).length, [items]);
+
+  const itemFuse = useMemo(() => new Fuse(items, {
+    keys: ['name', 'brand', 'category'],
+    threshold: 0.3
+  }), [items]);
+
+  const sortedItems = useMemo(() => {
+    let result = searchTerm ? itemFuse.search(searchTerm).map(r => r.item) : items;
+    
+    if (showLowStockOnly) {
+      result = result.filter(item => (item.mainStock || 0) <= (item.lowStockThreshold || 5));
+    }
+    if (filterBrand) {
+      result = result.filter(item => item.brand === filterBrand);
+    }
+    if (filterCategory) {
+      result = result.filter(item => item.category === filterCategory);
+    }
+    
+    return result;
+  }, [searchTerm, items, itemFuse, showLowStockOnly, filterBrand, filterCategory]);
+
+  const sortedMainItems = useMemo(() => sortedItems.filter(i => !i.isExtra), [sortedItems]);
+  const sortedExtras = useMemo(() => sortedItems.filter(i => i.isExtra), [sortedItems]);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -79,6 +112,7 @@ const Inventory: React.FC = () => {
     openingBalance: '' as number | '',
     lowStockThreshold: 5 as number | '',
   });
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
   const getInputFieldClass = (fieldName: string, value: any, isNumber: boolean = false, min: number = 0) => {
     const hasError = !!errors[fieldName];
@@ -105,7 +139,7 @@ const Inventory: React.FC = () => {
         });
         setSalesmanInventory(inv);
       }, (error) => {
-        console.error("Salesman inventory listener error:", error);
+        if (import.meta.env.DEV) console.error("Salesman inventory listener error:", error);
       });
     }
 
@@ -144,9 +178,13 @@ const Inventory: React.FC = () => {
     if (!formData.name.trim()) newErrors.name = 'Item name is required';
     if (!formData.category) newErrors.category = 'Category is required';
     if (!formData.brand) newErrors.brand = 'Brand is required';
-    if (formData.openingBalance === '' || Number(formData.openingBalance) < 0) newErrors.openingBalance = 'Opening balance must be 0 or more';
-    if (formData.lowStockThreshold === '' || Number(formData.lowStockThreshold) < 0) newErrors.lowStockThreshold = 'Low stock limit must be 0 or more';
-
+    
+    // Only requirement for non-extras
+    if (activeTab === 'main') {
+      if (formData.openingBalance === '' || Number(formData.openingBalance) < 0) newErrors.openingBalance = 'Opening balance must be 0 or more';
+      if (formData.lowStockThreshold === '' || Number(formData.lowStockThreshold) < 0) newErrors.lowStockThreshold = 'Low stock limit must be 0 or more';
+    }
+    
     // Duplicate check
     const isDuplicate = items.some(item => 
       item.name.toLowerCase().trim() === formData.name.toLowerCase().trim() && 
@@ -174,9 +212,10 @@ const Inventory: React.FC = () => {
     try {
       const payload = {
         ...formData,
-        openingBalance: Number(formData.openingBalance),
+        isExtra: activeTab === 'extras',
+        openingBalance: activeTab === 'extras' ? 0 : Number(formData.openingBalance),
         lowStockThreshold: Number(formData.lowStockThreshold),
-        mainStock: editingItem ? (items.find(i => i.id === editingItem.id)?.mainStock || Number(formData.openingBalance)) : Number(formData.openingBalance),
+        mainStock: activeTab === 'extras' ? 0 : (editingItem ? (items.find(i => i.id === editingItem.id)?.mainStock || Number(formData.openingBalance)) : Number(formData.openingBalance)),
         unit: editingItem ? (items.find(i => i.id === editingItem.id)?.unit || 'pcs') : 'pcs',
         purchasePrice: editingItem ? (items.find(i => i.id === editingItem.id)?.purchasePrice || 0) : 0,
         sellingPrice: editingItem ? (items.find(i => i.id === editingItem.id)?.sellingPrice || 0) : 0
@@ -220,8 +259,9 @@ const Inventory: React.FC = () => {
         setErrors({});
       }
     } catch (error: any) {
-      console.error("Error saving item:", error);
-      alert("Error saving item: " + (error.message || "An unknown error occurred"));
+      if (import.meta.env.DEV) console.error("Error saving item:", error);
+      setSubmissionError("Error saving item: " + (error.message || "An unknown error occurred"));
+      setTimeout(() => setSubmissionError(null), 5000);
     } finally {
       clearTimeout(safetyTimer);
       setIsSubmitting(false);
@@ -229,8 +269,14 @@ const Inventory: React.FC = () => {
   };
 
   const deleteItem = async (id: string) => {
-    if (window.confirm('Delete this item from catalog?') && user?.role === 'admin') {
+    if (user?.role !== 'admin') return;
+    try {
       await deleteDoc(doc(db, 'items', id));
+      setDeleteItemId(null);
+    } catch (error: any) {
+      if (import.meta.env.DEV) console.error("Error deleting item:", error);
+      setSubmissionError("Failed to delete item. Please try again.");
+      setTimeout(() => setSubmissionError(null), 3000);
     }
   };
 
@@ -260,24 +306,41 @@ const Inventory: React.FC = () => {
       }
       setItemStockBreakdown(breakdown);
     } catch (error) {
-      console.error("Error fetching stock breakdown:", error);
+      if (import.meta.env.DEV) console.error("Error fetching stock breakdown:", error);
     } finally {
       setDetailsLoading(false);
     }
   };
 
-  const generateStockSummaryPDF = () => {
-    // Determine which items to include
-    const itemsToProcess = [...filteredItems];
+  const handleConvertExtraToMain = async () => {
+    if (!itemToConvert || convertOpeningStock === '' || Number(convertOpeningStock) < 0 || isSubmitting) return;
 
-    // Sort items: Group by Brand (A→Z), then by Name (A→Z) within brand
-    const sortedItems = itemsToProcess.sort((a, b) => {
-      const brandA = (a.brand || '-').toUpperCase();
-      const brandB = (b.brand || '-').toUpperCase();
-      const brandCompare = brandA.localeCompare(brandB);
-      if (brandCompare !== 0) return brandCompare;
-      return a.name.localeCompare(b.name);
-    });
+    setIsSubmitting(true);
+    try {
+      await updateDoc(doc(db, 'items', itemToConvert.id), {
+        isExtra: false,
+        mainStock: Number(convertOpeningStock),
+        openingBalance: Number(convertOpeningStock),
+        convertedAt: new Date(), // using local date as proxy or serverTimestamp if imported
+        convertedFrom: 'extra'
+      });
+      
+      setShowConvertModal(false);
+      setItemToConvert(null);
+      setConvertOpeningStock('');
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3000);
+    } catch (error) {
+      console.error("Error converting item:", error);
+      setSubmissionError("Failed to convert item.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const generateStockSummaryPDF = () => {
+    const mainItems = items.filter(i => !i.isExtra);
+    const extraItems = items.filter(i => i.isExtra);
 
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.width;
@@ -367,20 +430,24 @@ const Inventory: React.FC = () => {
     doc.setLineWidth(0.3);
     doc.line(14, 47, pageWidth - 14, 47);
 
+    // MAIN ITEMS SECTION
+    doc.setFontSize(12);
+    doc.setTextColor(15, 23, 42);
+    doc.setFont('helvetica', 'bold');
+    doc.text('MAIN INVENTORY ITEMS', 14, 50);
+
     let sn = 1;
     let lastBrand = '';
     let brandSubtotal = 0;
-    const tableBody: any[] = [];
+    const mainTableBody: any[] = [];
 
-    // Reset brand grouping logic for A-Z sort if needed, but keeping subtotal logic as it makes sense for grouping
-    sortedItems.forEach((item, index) => {
+    sortedMainItems.forEach((item, index) => {
       const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
       const isLow = stock <= (item.lowStockThreshold || 5);
       const currentBrand = item.brand || '-';
 
-      // Brand logic (A-Z sorted items will naturally group brands if users use standard naming)
       if (index > 0 && currentBrand !== lastBrand) {
-        tableBody.push([
+        mainTableBody.push([
           '',
           '',
           { content: `${lastBrand} Total:`, styles: { halign: 'right', fontStyle: 'bold', fontSize: 10, textColor: [0, 0, 0] } },
@@ -389,12 +456,12 @@ const Inventory: React.FC = () => {
         brandSubtotal = 0;
       }
 
-      const brandDisplay = currentBrand;
+      const brandDisplay = currentBrand === lastBrand ? '' : currentBrand;
       const rowStyle = isLow ? { fillColor: [254, 242, 242] } : {};
       
-      tableBody.push([
+      mainTableBody.push([
         { content: String(sn++), styles: { ...rowStyle, textColor: [0, 0, 0] } },
-        { content: brandDisplay, styles: { ...rowStyle, fontStyle: brandDisplay ? 'bold' : 'normal', textColor: [0, 0, 0] } },
+        { content: brandDisplay, styles: { ...rowStyle, fontStyle: 'bold', textColor: [0, 0, 0] } },
         { content: item.name, styles: { ...rowStyle, textColor: [0, 0, 0] } },
         { 
           content: String(stock),
@@ -405,8 +472,8 @@ const Inventory: React.FC = () => {
       brandSubtotal += stock;
       lastBrand = currentBrand;
 
-      if (index === sortedItems.length - 1) {
-        tableBody.push([
+      if (index === sortedMainItems.length - 1) {
+        mainTableBody.push([
           '',
           '',
           { content: `${currentBrand} Total:`, styles: { halign: 'right', fontStyle: 'bold', fontSize: 10, textColor: [0, 0, 0] } },
@@ -416,41 +483,56 @@ const Inventory: React.FC = () => {
     });
 
     autoTable(doc, {
-      startY: 51,
+      startY: 54,
       head: [['SN', 'BRAND', 'ITEM NAME', 'QTY']],
-      body: tableBody,
+      body: mainTableBody,
       columnStyles: {
         0: { cellWidth: 12, halign: 'center' },
         1: { cellWidth: 35 },
         2: { cellWidth: 'auto' },
         3: { cellWidth: 25, halign: 'center' },
       },
-      headStyles: {
-        fillColor: [15, 23, 42],
-        textColor: 255,
-        fontStyle: 'bold',
-        fontSize: 9,
+      headStyles: { fillColor: [15, 23, 42], textColor: 255 },
+      styles: { fontSize: 9, cellPadding: 3, textColor: [0, 0, 0] },
+      alternateRowStyles: { fillColor: [249, 249, 249] },
+    });
+
+    let currentY = (doc as any).lastAutoTable.finalY + 15;
+
+    // EXTRAS SECTION
+    if (pageHeight - currentY < 40) {
+      doc.addPage();
+      currentY = 20;
+    }
+
+    doc.setFontSize(12);
+    doc.setDrawColor(245, 158, 11);
+    doc.setTextColor(245, 158, 11); // Amber
+    doc.setFont('helvetica', 'bold');
+    doc.text('EXTRAS CATALOG', 14, currentY);
+    doc.setLineWidth(0.5);
+    doc.line(14, currentY + 2, pageWidth - 14, currentY + 2);
+
+    const extrasTableBody = sortedExtras.map((item, idx) => [
+      String(idx + 1),
+      item.brand || '-',
+      item.name,
+      'N/A'
+    ]);
+
+    autoTable(doc, {
+      startY: currentY + 5,
+      head: [['SN', 'BRAND', 'ITEM NAME', 'QTY']],
+      body: extrasTableBody,
+      columnStyles: {
+        0: { cellWidth: 12, halign: 'center' },
+        1: { cellWidth: 35 },
+        2: { cellWidth: 'auto' },
+        3: { cellWidth: 25, halign: 'center' },
       },
-      styles: {
-        fontSize: 9,
-        cellPadding: 3,
-        textColor: [0, 0, 0], // Set default text color to pure black
-      },
-      alternateRowStyles: {
-        fillColor: [249, 249, 249],
-      },
-      didDrawPage: (data) => {
-        const pageCount = doc.getNumberOfPages();
-        doc.setFontSize(8);
-        doc.setTextColor(0, 0, 0); // Black footer text
-        doc.text(
-          `Page ${data.pageNumber} of ${pageCount}`,
-          pageWidth / 2,
-          pageHeight - 8,
-          { align: 'center' }
-        );
-        doc.text('CloudStock Pro', 14, pageHeight - 8);
-      }
+      headStyles: { fillColor: [245, 158, 11], textColor: 255 },
+      styles: { fontSize: 9, cellPadding: 3, textColor: [0, 0, 0] },
+      alternateRowStyles: { fillColor: [255, 251, 235] },
     });
 
     const finalY = (doc as any).lastAutoTable.finalY + 8;
@@ -463,13 +545,14 @@ const Inventory: React.FC = () => {
       return stock <= (i.lowStockThreshold || 5);
     }).length;
 
-    const totalsHeight = 35;
+    const totalsHeight = 45;
     const startY = finalY + totalsHeight > pageHeight - 20
       ? (doc.addPage(), 20)
       : finalY;
 
+    // TOTALS BOX
     doc.setFillColor(245, 245, 245);
-    doc.roundedRect(14, startY, pageWidth - 28, 30, 2, 2, 'F');
+    doc.roundedRect(14, startY, pageWidth - 28, 40, 2, 2, 'F');
     
     doc.setDrawColor(99, 102, 241);
     doc.setLineWidth(1);
@@ -478,18 +561,25 @@ const Inventory: React.FC = () => {
     const valX = pageWidth - 20;
 
     doc.setFontSize(10);
-    doc.setTextColor(0, 0, 0); // Black text
+    doc.setTextColor(0, 0, 0);
     doc.setFont('helvetica', 'bold');
-    doc.text(`Total Items:`, 20, startY + 8);
-    doc.text(`Total Qty:`, 20, startY + 16);
-    doc.text(`Low Stock Items:`, 20, startY + 24);
+    doc.text(`Total Main Items:`, 20, startY + 8);
+    doc.text(`Total Extras:`, 20, startY + 16);
+    doc.text(`Total Main Qty:`, 20, startY + 24);
+    doc.text(`Low Stock Items:`, 20, startY + 32);
 
     doc.setTextColor(99, 102, 241);
-    doc.text(`${sortedItems.length}`, valX, startY + 8, { align: 'right' });
-    doc.text(`${totalQty} units`, valX, startY + 16, { align: 'right' });
+    doc.text(`${mainItems.length}`, valX, startY + 8, { align: 'right' });
+    doc.text(`${extraItems.length}`, valX, startY + 16, { align: 'right' });
+    
+    const totalMainQty = mainItems.reduce((sum, item) => {
+      const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
+      return sum + (stock || 0);
+    }, 0);
+    doc.text(`${totalMainQty} units`, valX, startY + 24, { align: 'right' });
     
     doc.setTextColor(220, 38, 38);
-    doc.text(`${lowStockCount}`, valX, startY + 24, { align: 'right' });
+    doc.text(`${lowStockCount}`, valX, startY + 32, { align: 'right' });
 
     doc.setFontSize(8);
     doc.setTextColor(0, 0, 0); // Black text
@@ -519,6 +609,13 @@ const Inventory: React.FC = () => {
     
     let result = term ? fuse.search(term).map(res => res.item) : items;
 
+    // FILTER BY TAB
+    if (activeTab === 'extras') {
+      result = result.filter(i => i.isExtra);
+    } else {
+      result = result.filter(i => !i.isExtra);
+    }
+
     return result.filter(item => {
       const myStock = salesmanInventory[item.id] || 0;
       const currentStock = (isAdmin && !selectedSalesmanId) ? item.mainStock : myStock;
@@ -532,12 +629,34 @@ const Inventory: React.FC = () => {
       
       return true;
     });
-  }, [items, searchTerm, fuse, user?.id, user?.role, salesmanInventory, selectedSalesmanId, filterBrand, filterCategory, showLowStockOnly]);
+  }, [items, searchTerm, fuse, user?.id, user?.role, salesmanInventory, selectedSalesmanId, filterBrand, filterCategory, showLowStockOnly, activeTab]);
 
   if (itemsLoading) return <div>Loading inventory...</div>;
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
+      {/* Tab Selection */}
+      <div className="flex p-1 bg-gray-100 rounded-xl w-fit border border-gray-200">
+        <button
+          onClick={() => setActiveTab('main')}
+          className={cn(
+            "px-6 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all",
+            activeTab === 'main' ? "bg-white text-indigo-600 shadow-sm border border-gray-200" : "text-gray-500 hover:text-gray-700"
+          )}
+        >
+          Main Items ({mainItemsCount})
+        </button>
+        <button
+          onClick={() => setActiveTab('extras')}
+          className={cn(
+            "px-6 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all",
+            activeTab === 'extras' ? "bg-white text-amber-600 shadow-sm border border-gray-200" : "text-gray-500 hover:text-gray-700"
+          )}
+        >
+          Extras ({extrasCount})
+        </button>
+      </div>
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 tracking-tight">
@@ -584,10 +703,13 @@ const Inventory: React.FC = () => {
                 setFormData({ name: '', category: '', brand: '', openingBalance: '' as any, lowStockThreshold: 5 });
                 setModalOpen(true);
               }}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded text-xs font-bold hover:bg-blue-700 transition-colors shadow-sm"
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 text-white rounded text-xs font-bold transition-colors shadow-sm",
+                activeTab === 'extras' ? "bg-amber-600 hover:bg-amber-700" : "bg-blue-600 hover:bg-blue-700"
+              )}
             >
               <Plus className="w-4 h-4" />
-              ADD NEW ITEM
+              {activeTab === 'extras' ? 'ADD NEW EXTRA ITEM' : 'ADD NEW ITEM'}
             </button>
           )}
         </div>
@@ -677,7 +799,14 @@ const Inventory: React.FC = () => {
                     <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
                       {item.brand}
                     </span>
-                    <h3 className="text-lg font-bold text-gray-900 mt-1">{item.name}</h3>
+                    <div className="flex items-center gap-2 mt-1">
+                      <h3 className="text-lg font-bold text-gray-900">{item.name}</h3>
+                      {item.isExtra && (
+                        <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-[9px] font-black uppercase rounded shadow-sm">
+                          Extra
+                        </span>
+                      )}
+                    </div>
                     <p className="text-[11px] font-medium text-gray-500 uppercase">{item.category}</p>
                   </div>
                   <div className="flex gap-2">
@@ -692,28 +821,38 @@ const Inventory: React.FC = () => {
                     )}
                     {user?.role === 'admin' && (
                       <>
-                        <button 
-                          onClick={() => {
-                            setEditingItem(item);
-                            setFormData({ 
-                              name: item.name, 
-                              category: item.category, 
-                              brand: item.brand, 
-                              openingBalance: item.openingBalance,
-                              lowStockThreshold: item.lowStockThreshold || 5,
-                            });
-                            setModalOpen(true);
-                          }}
-                          className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
-                        <button 
-                          onClick={() => deleteItem(item.id)}
-                          className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {deleteItemId === item.id ? (
+                          <div className="flex items-center gap-2 bg-red-50 p-1 rounded-lg border border-red-100 animate-in fade-in slide-in-from-right-1 duration-200">
+                             <span className="text-[8px] font-black text-red-600 uppercase px-1">Delete?</span>
+                             <button onClick={() => setDeleteItemId(null)} className="px-2 py-1 bg-white text-red-600 text-[9px] rounded font-bold uppercase hover:bg-red-50 transition-colors">No</button>
+                             <button onClick={() => deleteItem(item.id)} className="px-2 py-1 bg-red-600 text-white text-[9px] rounded font-bold uppercase hover:bg-red-700 transition-all active:scale-95">Yes</button>
+                          </div>
+                        ) : (
+                          <>
+                            <button 
+                              onClick={() => {
+                                setEditingItem(item);
+                                setFormData({ 
+                                  name: item.name, 
+                                  category: item.category, 
+                                  brand: item.brand, 
+                                  openingBalance: item.openingBalance,
+                                  lowStockThreshold: item.lowStockThreshold || 5,
+                                });
+                                setModalOpen(true);
+                              }}
+                              className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            <button 
+                              onClick={() => setDeleteItemId(item.id)}
+                              className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
                       </>
                     )}
                   </div>
@@ -731,28 +870,45 @@ const Inventory: React.FC = () => {
                         "text-3xl font-bold",
                         isLow ? "text-red-600" : "text-gray-900"
                       )}>
-                        {currentDisplayStock}
+                        {item.isExtra && !selectedSalesmanId && user?.role === 'admin' ? '-' : currentDisplayStock}
                       </span>
-                      {isLow && (
+                      {isLow && !item.isExtra && (
                         <div className="flex items-center gap-1 text-red-600 text-[10px] font-bold bg-red-100 px-2 py-0.5 rounded uppercase">
                           Low Stock
                         </div>
+                      )}
+                      {item.isExtra && !selectedSalesmanId && user?.role === 'admin' && (
+                        <span className="text-xs font-bold text-gray-400 uppercase">No main stock</span>
                       )}
                     </div>
                   </div>
                   {user?.role === 'admin' && selectedSalesmanId && (
                     <div className="text-right">
                        <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-tight">In Main Store</p>
-                       <p className="text-sm font-bold text-gray-600">{item.mainStock}</p>
+                       <p className="text-sm font-bold text-gray-600">{item.isExtra ? '-' : item.mainStock}</p>
                     </div>
                   )}
                   {(!selectedSalesmanId || user?.role === 'salesman') && (
                     <div className="text-right">
                        <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-tight">Opening</p>
-                       <p className="text-sm font-bold text-gray-600">{item.openingBalance}</p>
+                       <p className="text-sm font-bold text-gray-600">{item.isExtra ? '-' : item.openingBalance}</p>
                     </div>
                   )}
                 </div>
+
+                {item.isExtra && user?.role === 'admin' && (
+                   <div className="mt-4 pt-4 border-t border-slate-100">
+                      <button
+                        onClick={() => {
+                          setItemToConvert(item);
+                          setShowConvertModal(true);
+                        }}
+                        className="w-full py-2 bg-indigo-50 text-indigo-700 text-[10px] font-black uppercase rounded-lg hover:bg-indigo-100 transition-colors tracking-widest"
+                      >
+                        Convert to Main Item
+                      </button>
+                   </div>
+                )}
               </motion.div>
             );
           })}
@@ -866,10 +1022,15 @@ const Inventory: React.FC = () => {
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white w-full max-w-md rounded-2xl shadow-2xl relative z-10 overflow-hidden"
+              className="bg-white w-full max-w-lg rounded-2xl shadow-2xl relative z-10 overflow-hidden"
             >
               <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                <h2 className="text-xl font-bold">{editingItem ? 'Edit Item' : 'Add New Item'}</h2>
+                <div>
+                  <h2 className="text-xl font-bold">{editingItem ? 'Edit Item' : `Add New ${activeTab === 'extras' ? 'Extra' : 'Item'}`}</h2>
+                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-0.5">
+                    {activeTab === 'extras' ? 'Adding as Extra Item — No main stock tracking' : 'Full warehouse stock management'}
+                  </p>
+                </div>
                 <button onClick={() => setModalOpen(false)} className="text-slate-400 hover:text-slate-600">
                   <X className="w-6 h-6" />
                 </button>
@@ -888,26 +1049,14 @@ const Inventory: React.FC = () => {
                       </p>
                     </motion.div>
                   )}
-                  {!navigator.onLine && (
+                  {submissionError && (
                     <motion.div 
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      className="bg-amber-50 text-amber-700 p-3 rounded-lg border border-amber-100 mb-4"
-                    >
-                      <p className="text-[10px] font-black uppercase tracking-widest text-center">
-                        You are offline. Your data will be saved when connection is restored.
-                      </p>
-                    </motion.div>
-                  )}
-                  {showToast && (
-                    <motion.div
                       initial={{ opacity: 0, y: -10 }}
                       animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -10 }}
-                      className="bg-emerald-50 text-emerald-700 px-4 py-2 rounded-lg border border-emerald-100 flex items-center gap-2 mb-2"
+                      className="bg-red-50 text-red-700 p-3 rounded-lg border border-red-100 mb-4 flex items-center gap-2"
                     >
-                      <CheckCircle2 className="w-4 h-4" />
-                      <span className="text-xs font-bold uppercase tracking-tight">Item saved! Add another:</span>
+                      <AlertCircle className="w-4 h-4" />
+                      <p className="text-xs font-bold">{submissionError}</p>
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -925,10 +1074,7 @@ const Inventory: React.FC = () => {
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div id="field-category">
-                    <div className="flex justify-between items-center mb-1">
-                      <label className="text-sm font-bold text-slate-700">Category <span className="text-red-500">*</span></label>
-                      <Link to="/categories" className="text-[10px] text-indigo-600 hover:underline font-bold">MANAGE</Link>
-                    </div>
+                    <label className="text-sm font-bold text-slate-700 block mb-1">Category <span className="text-red-500">*</span></label>
                     <select
                       value={formData.category}
                       onChange={e => setFormData({...formData, category: e.target.value})}
@@ -936,15 +1082,11 @@ const Inventory: React.FC = () => {
                     >
                       <option value="">Select...</option>
                       {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-                      {categories.length === 0 && <option disabled>No categories found</option>}
                     </select>
                     {errors.category && <p className="text-red-400 text-xs mt-1">{errors.category}</p>}
                   </div>
                   <div id="field-brand">
-                    <div className="flex justify-between items-center mb-1">
-                      <label className="text-sm font-bold text-slate-700">Brand <span className="text-red-500">*</span></label>
-                      <Link to="/brands" className="text-[10px] text-indigo-600 hover:underline font-bold">MANAGE</Link>
-                    </div>
+                    <label className="text-sm font-bold text-slate-700 block mb-1">Brand <span className="text-red-500">*</span></label>
                     <select
                       value={formData.brand}
                       onChange={e => setFormData({...formData, brand: e.target.value})}
@@ -952,66 +1094,70 @@ const Inventory: React.FC = () => {
                     >
                       <option value="">Select...</option>
                       {brands.map(b => <option key={b.id} value={b.name}>{b.name}</option>)}
-                      {brands.length === 0 && <option disabled>No brands found</option>}
                     </select>
                     {errors.brand && <p className="text-red-400 text-xs mt-1">{errors.brand}</p>}
                   </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
-                  <div id="field-openingBalance">
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Opening Balance <span className="text-red-500">*</span></label>
-                    <input
-                      type="number"
-                      value={formData.openingBalance}
-                      onChange={e => setFormData({...formData, openingBalance: e.target.value === '' ? '' : parseInt(e.target.value)})}
-                      placeholder="0"
-                      className={getInputFieldClass('openingBalance', formData.openingBalance, true, 0)}
-                    />
-                    {errors.openingBalance && <p className="text-red-400 text-xs mt-1">{errors.openingBalance}</p>}
-                  </div>
-                  <div id="field-lowStockThreshold">
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Low Stock Limit <span className="text-red-500">*</span></label>
-                    <input
-                      type="number"
-                      value={formData.lowStockThreshold}
-                      onChange={e => setFormData({...formData, lowStockThreshold: e.target.value === '' ? '' : parseInt(e.target.value)})}
-                      placeholder="5"
-                      className={getInputFieldClass('lowStockThreshold', formData.lowStockThreshold, true, 0)}
-                    />
-                    {errors.lowStockThreshold && <p className="text-red-400 text-xs mt-1">{errors.lowStockThreshold}</p>}
-                  </div>
-                </div>
-                <div className="flex flex-col sm:flex-row gap-3 pt-2">
-                  <button
-                    type="submit"
-                    disabled={isSubmitting}
-                    className="flex-1 py-4 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-[0.98] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                  >
-                    {isSubmitting ? (
-                      <>
-                        <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
-                        SAVING...
-                      </>
-                    ) : (
-                      editingItem ? 'UPDATE ITEM CONFIG' : 'CREATE NEW ITEM'
-                    )}
-                  </button>
-                  {!editingItem && (
-                    <button
-                      type="button"
-                      disabled={isSubmitting}
-                      onClick={(e) => handleSave(e, true)}
-                      className="flex-1 py-4 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 active:scale-[0.98] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                    >
-                      {isSubmitting ? (
-                        <>
-                          <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
-                          SAVING...
-                        </>
-                      ) : 'SAVE & ADD NEXT'}
-                    </button>
+                  {activeTab === 'main' && (
+                    <>
+                      <div id="field-openingBalance">
+                        <label className="block text-sm font-bold text-slate-700 mb-1">Opening Bal <span className="text-red-500">*</span></label>
+                        <input
+                          type="number"
+                          value={formData.openingBalance}
+                          onChange={e => setFormData({...formData, openingBalance: e.target.value === '' ? '' : Number(e.target.value)})}
+                          placeholder="0"
+                          className={getInputFieldClass('openingBalance', formData.openingBalance, true)}
+                        />
+                        {errors.openingBalance && <p className="text-red-400 text-xs mt-1">{errors.openingBalance}</p>}
+                      </div>
+                      <div id="field-lowStockThreshold">
+                        <label className="block text-sm font-bold text-slate-700 mb-1">Low Stock Limit <span className="text-red-500">*</span></label>
+                        <input
+                          type="number"
+                          value={formData.lowStockThreshold}
+                          onChange={e => setFormData({...formData, lowStockThreshold: e.target.value === '' ? '' : Number(e.target.value)})}
+                          placeholder="5"
+                          className={getInputFieldClass('lowStockThreshold', formData.lowStockThreshold, true)}
+                        />
+                        {errors.lowStockThreshold && <p className="text-red-400 text-xs mt-1">{errors.lowStockThreshold}</p>}
+                      </div>
+                    </>
                   )}
+                </div>
+
+                <div className="pt-6 flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setModalOpen(false)}
+                    className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-colors uppercase text-[10px] tracking-widest"
+                  >
+                    Cancel
+                  </button>
+                  <div className="flex-[2] flex gap-2">
+                    {!editingItem && (
+                       <button
+                         type="button"
+                         onClick={(e) => handleSave(e, true)}
+                         disabled={isSubmitting}
+                         className="flex-1 py-3 bg-white border border-slate-300 text-slate-700 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center justify-center gap-2"
+                       >
+                         Save & Next
+                       </button>
+                    )}
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className={cn(
+                        "flex-1 py-3 text-white font-bold rounded-xl transition-all uppercase text-[10px] tracking-widest",
+                        activeTab === 'extras' ? "bg-amber-600 hover:bg-amber-700 shadow-amber-100 shadow-lg" : "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100 shadow-lg"
+                      )}
+                    >
+                      {isSubmitting ? 'Saving...' : (editingItem ? 'Update' : 'Save Item')}
+                    </button>
+                  </div>
                 </div>
               </form>
             </motion.div>

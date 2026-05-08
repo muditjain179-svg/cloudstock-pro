@@ -25,6 +25,8 @@ const Dashboard: React.FC = () => {
   const [stats, setStats] = useState({
     totalSales: 0,
     mainStock: 0,
+    mainItemsCount: 0,
+    extrasCount: 0,
     salesmanStock: 0,
     lowStockCount: 0
   });
@@ -41,15 +43,22 @@ const Dashboard: React.FC = () => {
     if (!user || user.role !== 'admin') return;
 
     let mainStock = 0;
+    let mainItemsCount = 0;
+    let extrasCount = 0;
     const lowStock: Item[] = [];
     items.forEach(item => {
-      mainStock += item.mainStock || 0;
-      if ((item.mainStock || 0) < (item.lowStockThreshold || 5)) {
-        lowStock.push(item);
+      if (item.isExtra) {
+        extrasCount++;
+      } else {
+        mainItemsCount++;
+        mainStock += item.mainStock || 0;
+        if ((item.mainStock || 0) < (item.lowStockThreshold || 5)) {
+          lowStock.push(item);
+        }
       }
     });
     setLowStockItems(lowStock);
-    setStats(prev => ({ ...prev, mainStock, lowStockCount: lowStock.length }));
+    setStats(prev => ({ ...prev, mainStock, mainItemsCount, extrasCount, lowStockCount: lowStock.length }));
   }, [items, user]);
 
   useEffect(() => {
@@ -63,7 +72,7 @@ const Dashboard: React.FC = () => {
     const unsubBills = onSnapshot(billsQ, (snapshot) => {
       setRecentBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
     }, (error) => {
-      console.error("Dashboard bills listener error:", error);
+      if (import.meta.env.DEV) console.error("Dashboard bills listener error:", error);
     });
 
     // Salesman personal inventory listener if needed
@@ -80,6 +89,7 @@ const Dashboard: React.FC = () => {
           // Join with items catalog for name and real threshold
           const catalogItem = items.find(i => i.id === invItem.id);
           const threshold = catalogItem?.lowStockThreshold || 5;
+          const isExtra = !!catalogItem?.isExtra;
           
           if ((invItem.quantity || 0) <= threshold) {
             lowStock.push({ 
@@ -87,7 +97,8 @@ const Dashboard: React.FC = () => {
               name: catalogItem?.name || invItem.itemName || 'Stock Item',
               brand: catalogItem?.brand || invItem.brand || '',
               mainStock: invItem.quantity,
-              lowStockThreshold: threshold 
+              lowStockThreshold: threshold,
+              isExtra
             });
           }
         });
@@ -125,7 +136,7 @@ const Dashboard: React.FC = () => {
 
         setStats(prev => ({ ...prev, totalSales }));
       } catch (error) {
-        console.error("Dashboard sales fetch error:", error);
+        if (import.meta.env.DEV) console.error("Dashboard sales fetch error:", error);
       } finally {
         setLoading(false);
       }
@@ -137,7 +148,7 @@ const Dashboard: React.FC = () => {
 
   const cards = [
     { label: 'Total Revenue', value: stats.totalSales, icon: TrendingUp, color: 'text-emerald-600', bg: 'bg-emerald-50' },
-    { label: user.role === 'admin' ? 'Main Inventory' : 'My Total Stock', value: stats.mainStock, icon: Package, color: 'text-indigo-600', bg: 'bg-indigo-50' },
+    { label: user.role === 'admin' ? 'Main Inventory' : 'My Total Stock', value: stats.mainStock, icon: Package, color: 'text-indigo-600', bg: 'bg-indigo-50', subValue: user.role === 'admin' ? `${stats.mainItemsCount} Items • ${stats.extrasCount} Extras` : undefined },
     { label: 'Low Stock Items', value: stats.lowStockCount, icon: AlertTriangle, color: 'text-amber-600', bg: 'bg-amber-50' },
   ];
 
@@ -181,9 +192,14 @@ const Dashboard: React.FC = () => {
                     )}
                   </div>
                   <div className="flex items-center justify-between">
-                    <p className="text-2xl font-bold text-gray-900">
-                      {card.label.includes('Revenue') ? formatCurrency(card.value) : card.value} 
-                    </p>
+                    <div>
+                      <p className="text-2xl font-bold text-gray-900">
+                        {card.label.includes('Revenue') ? formatCurrency(card.value) : card.value} 
+                      </p>
+                      {card.subValue && (
+                        <p className="text-[9px] font-bold text-indigo-500 uppercase tracking-tighter mt-0.5">{card.subValue}</p>
+                      )}
+                    </div>
                     <Icon className={cn("w-5 h-5 opacity-20", card.color)} />
                   </div>
                 </motion.div>
@@ -205,14 +221,25 @@ const Dashboard: React.FC = () => {
                     initial={{ opacity: 0, scale: 0.95 }}
                     animate={{ opacity: 1, scale: 1 }}
                     key={item.id} 
-                    className="bg-white p-3 rounded-lg border border-red-200 flex justify-between items-center"
+                    className={cn(
+                      "p-3 rounded-lg border flex justify-between items-center transition-colors shadow-sm",
+                      (item as any).isExtra ? "bg-amber-50/50 border-amber-200" : "bg-white border-red-200"
+                    )}
                   >
                     <div>
-                      <p className="text-xs font-bold text-gray-900">{item.name}</p>
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-xs font-bold text-gray-900">{item.name}</p>
+                        {(item as any).isExtra && (
+                          <span className="text-[7px] px-1 py-0.5 bg-amber-100 text-amber-700 border border-amber-200 rounded font-black tracking-widest uppercase">Extra</span>
+                        )}
+                      </div>
                       <p className="text-[10px] text-gray-500 uppercase">{item.brand}</p>
                     </div>
                     <div className="text-right">
-                      <p className="text-[10px] text-red-600 font-bold">{item.mainStock} LEFT</p>
+                      <p className={cn(
+                        "text-[10px] font-bold",
+                        (item as any).isExtra ? "text-amber-600" : "text-red-600"
+                      )}>{item.mainStock} LEFT</p>
                       <p className="text-[9px] text-gray-400">Limit: {item.lowStockThreshold}</p>
                     </div>
                   </motion.div>

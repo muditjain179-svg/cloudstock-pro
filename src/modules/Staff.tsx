@@ -52,37 +52,41 @@ const Staff: React.FC = () => {
   const [isCreating, setIsCreating] = useState(false);
   const [newStaff, setNewStaff] = useState({ name: '', email: '', password: '', role: 'salesman' as const });
   const [createError, setCreateError] = useState<string | null>(null);
+  const [createSuccess, setCreateSuccess] = useState(false);
+  const [confirmToggleId, setConfirmToggleId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(null);
 
   const toggleRole = async (targetUser: UserProfile) => {
     if (targetUser.email === 'muditjain179@gmail.com') {
-      alert("Cannot change role of the primary admin.");
+      setOperationError("Cannot change role of the primary admin.");
+      setTimeout(() => setOperationError(null), 3000);
       return;
     }
     
-    const newRole = targetUser.role === 'admin' ? 'salesman' : 'admin';
-    const confirmed = window.confirm(`Change ${targetUser.name}'s role to ${newRole.toUpperCase()}?`);
-    if (!confirmed) return;
-
     try {
+      const newRole = targetUser.role === 'admin' ? 'salesman' : 'admin';
       await updateDoc(doc(db, 'users', targetUser.id), { role: newRole });
+      setConfirmToggleId(null);
     } catch (error: any) {
-      alert("Error updating role: " + error.message);
+      setOperationError("Error updating role: " + error.message);
+      setTimeout(() => setOperationError(null), 3000);
     }
   };
 
   const deleteStaff = async (targetUser: UserProfile) => {
     if (targetUser.email === 'muditjain179@gmail.com' || targetUser.id === currentUser?.id) {
-       alert("Cannot delete primary admin or yourself.");
+       setOperationError("Cannot delete primary admin or yourself.");
+       setTimeout(() => setOperationError(null), 3000);
        return;
     }
 
-    const confirmed = window.confirm(`Are you sure you want to remove ${targetUser.name} from the system?`);
-    if (!confirmed) return;
-
     try {
       await deleteDoc(doc(db, 'users', targetUser.id));
+      setConfirmDeleteId(null);
     } catch (error: any) {
-      alert("Error deleting user: " + error.message);
+      setOperationError("Error deleting user: " + error.message);
+      setTimeout(() => setOperationError(null), 3000);
     }
   };
 
@@ -120,7 +124,8 @@ const Staff: React.FC = () => {
 
       setIsAddModalOpen(false);
       setNewStaff({ name: '', email: '', password: '', role: 'salesman' });
-      alert("Staff member created successfully!");
+      setCreateSuccess(true);
+      setTimeout(() => setCreateSuccess(false), 5000);
     } catch (error: any) {
       if (error.message && error.message.startsWith('{')) {
         try {
@@ -150,6 +155,30 @@ const Staff: React.FC = () => {
           <p className="text-xs text-gray-500 uppercase tracking-widest font-bold mt-1">Manage team roles and system access</p>
         </div>
         <div className="flex items-center gap-4">
+          <AnimatePresence>
+            {createSuccess && (
+              <motion.div 
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 20 }}
+                className="hidden sm:flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-600 border border-emerald-100 rounded-xl text-[10px] font-black uppercase tracking-widest"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                Staff Created Successfully
+              </motion.div>
+            )}
+            {operationError && (
+              <motion.div 
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 20 }}
+                className="flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 border border-rose-100 rounded-xl text-[10px] font-black uppercase tracking-widest"
+              >
+                <AlertTriangle className="w-4 h-4" />
+                {operationError}
+              </motion.div>
+            )}
+          </AnimatePresence>
           <button 
             onClick={() => setIsAddModalOpen(true)}
             className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-black uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
@@ -344,19 +373,39 @@ const Staff: React.FC = () => {
             </div>
 
             <div className="flex gap-2 pt-4 border-t border-slate-50">
-               <button 
-                onClick={() => toggleRole(member)}
-                className="flex-1 px-3 py-2 bg-slate-50 text-slate-600 rounded-lg text-[10px] font-black uppercase tracking-tight hover:bg-indigo-50 hover:text-indigo-600 transition-all border border-transparent hover:border-indigo-100"
-              >
-                Change Role
-              </button>
-              <button 
-                onClick={() => deleteStaff(member)}
-                className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all"
-                disabled={member.email === 'muditjain179@gmail.com' || member.id === currentUser?.id}
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+              {confirmToggleId === member.id ? (
+                <div className="flex-1 flex items-center justify-between bg-indigo-50 p-1.5 rounded-lg border border-indigo-100 animate-in fade-in slide-in-from-bottom-1 duration-200">
+                  <span className="text-[8px] font-black text-indigo-600 uppercase px-2 leading-tight">Change to {member.role === 'admin' ? 'SALESMAN' : 'ADMIN'}?</span>
+                  <div className="flex gap-1.5">
+                    <button onClick={() => setConfirmToggleId(null)} className="px-2.5 py-1 bg-white text-indigo-600 text-[9px] rounded font-bold uppercase hover:bg-indigo-50 transition-colors">No</button>
+                    <button onClick={() => toggleRole(member)} className="px-2.5 py-1 bg-indigo-600 text-white text-[9px] rounded font-bold uppercase hover:bg-indigo-700 active:scale-95 transition-all">Yes</button>
+                  </div>
+                </div>
+              ) : confirmDeleteId === member.id ? (
+                <div className="flex-1 flex items-center justify-between bg-rose-50 p-1.5 rounded-lg border border-rose-100 animate-in fade-in slide-in-from-bottom-1 duration-200">
+                  <span className="text-[8px] font-black text-rose-600 uppercase px-2 leading-tight">Confirm Remove?</span>
+                  <div className="flex gap-1.5">
+                    <button onClick={() => setConfirmDeleteId(null)} className="px-2.5 py-1 bg-white text-rose-600 text-[9px] rounded font-bold uppercase hover:bg-rose-50 transition-colors">No</button>
+                    <button onClick={() => deleteStaff(member)} className="px-2.5 py-1 bg-rose-600 text-white text-[9px] rounded font-bold uppercase hover:bg-rose-700 active:scale-95 transition-all">Yes</button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <button 
+                    onClick={() => setConfirmToggleId(member.id)}
+                    className="flex-1 px-3 py-2 bg-slate-50 text-slate-600 rounded-lg text-[10px] font-black uppercase tracking-tight hover:bg-indigo-50 hover:text-indigo-600 transition-all border border-transparent hover:border-indigo-100"
+                  >
+                    Change Role
+                  </button>
+                  <button 
+                    onClick={() => setConfirmDeleteId(member.id)}
+                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all"
+                    disabled={member.email === 'muditjain179@gmail.com' || member.id === currentUser?.id}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </>
+              )}
             </div>
             
             {member.email === 'muditjain179@gmail.com' && (

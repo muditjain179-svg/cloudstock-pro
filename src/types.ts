@@ -18,6 +18,9 @@ export interface Item {
   unit: string;
   purchasePrice: number;
   sellingPrice: number;
+  isExtra?: boolean;
+  convertedAt?: any;
+  convertedFrom?: 'extra';
 }
 
 export interface Brand {
@@ -53,6 +56,7 @@ export interface BillItem {
   brand: string;
   quantity: number;
   price: number;
+  isExtra?: boolean;
 }
 
 export type BillType = 'sale' | 'purchase' | 'transfer' | 'opening-stock' | 'opening_stock';

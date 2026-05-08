@@ -27,6 +27,8 @@ const Brands: React.FC = () => {
   const [editingBrand, setEditingBrand] = useState<Brand | null>(null);
   const [formData, setFormData] = useState({ name: '' });
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -44,8 +46,9 @@ const Brands: React.FC = () => {
       setEditingBrand(null);
       setFormData({ name: '' });
     } catch (error: any) {
-      console.error("Error saving brand:", error);
-      alert("Error saving brand: " + (error.message || "An unknown error occurred"));
+      if (import.meta.env.DEV) console.error("Error saving brand:", error);
+      setSubmissionError("Error saving brand: " + (error.message || "An unknown error occurred"));
+      setTimeout(() => setSubmissionError(null), 5000);
     } finally {
       clearTimeout(safetyTimer);
       setIsSubmitting(false);
@@ -106,22 +109,28 @@ const Brands: React.FC = () => {
                 </td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex justify-end gap-1">
-                    <button 
-                      onClick={() => { setEditingBrand(brand); setFormData({ name: brand.name }); setModalOpen(true); }}
-                      className="p-2 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
-                    >
-                      <Edit2 className="w-4 h-4" />
-                    </button>
-                    <button 
-                      onClick={() => {
-                        if (confirm('Delete this brand? This will not remove it from existing items but it will be removed from the library.')) {
-                          deleteDoc(doc(db, 'brands', brand.id));
-                        }
-                      }}
-                      className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    {deleteId === brand.id ? (
+                      <div className="flex items-center gap-2 bg-red-50 p-1 rounded-lg border border-red-100 animate-in fade-in slide-in-from-right-1 duration-200">
+                         <span className="text-[8px] font-black text-red-600 uppercase px-1">Confirm?</span>
+                         <button onClick={() => setDeleteId(null)} className="px-2 py-1 bg-white text-red-600 text-[9px] rounded font-bold uppercase hover:bg-red-50 transition-colors shadow-sm">No</button>
+                         <button onClick={async () => { await deleteDoc(doc(db, 'brands', brand.id)); setDeleteId(null); }} className="px-2 py-1 bg-red-600 text-white text-[9px] rounded font-bold uppercase hover:bg-red-700 transition-all active:scale-95 shadow-sm">Yes</button>
+                      </div>
+                    ) : (
+                      <>
+                        <button 
+                          onClick={() => { setEditingBrand(brand); setFormData({ name: brand.name }); setModalOpen(true); }}
+                          className="p-2 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                        >
+                          <Edit2 className="w-4 h-4" />
+                        </button>
+                        <button 
+                          onClick={() => setDeleteId(brand.id)}
+                          className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -143,6 +152,12 @@ const Brands: React.FC = () => {
                 <button onClick={() => setModalOpen(false)} className="p-2 hover:bg-gray-200 rounded-full transition-colors"><X className="w-5 h-5" /></button>
               </div>
               <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                {submissionError && (
+                  <div className="p-3 bg-red-50 text-red-700 text-[10px] font-black uppercase tracking-widest rounded-xl border border-red-100 flex items-center gap-2 mb-4 animate-in fade-in slide-in-from-top-1 duration-200">
+                    <X className="w-3 h-3 text-red-400" />
+                    {submissionError}
+                  </div>
+                )}
                 <AnimatePresence>
                   {!navigator.onLine && (
                     <motion.div 

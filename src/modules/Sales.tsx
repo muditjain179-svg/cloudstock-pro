@@ -103,6 +103,9 @@ const Sales: React.FC = () => {
     if (!inventoryLoaded && user?.role === 'salesman') return items;
 
     return items.filter(i => {
+      // Extras are always visible for admin, otherwise check stock
+      if (user?.role === 'admin' && i.isExtra) return true;
+      
       const stock = user?.role === 'admin' ? i.mainStock : (salesmanInventory[i.id] || 0);
       return (stock || 0) > 0;
     });
@@ -161,7 +164,7 @@ const Sales: React.FC = () => {
       setLastVisibleActive(snapshot.docs[snapshot.docs.length - 1] || null);
       setHasMoreActive(snapshot.docs.length === 50);
     } catch (error) {
-      console.error("Error loading initial bills:", error);
+      if (import.meta.env.DEV) console.error("Error loading initial bills:", error);
     } finally {
       clearTimeout(safetyTimer);
       setLoading(false);
@@ -213,7 +216,7 @@ const Sales: React.FC = () => {
     const unsubDrafts = onSnapshot(draftsQ, (snapshot) => {
       setDraftBills(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Bill)));
     }, (error) => {
-      console.error("Draft bills listener error:", error);
+      if (import.meta.env.DEV) console.error("Draft bills listener error:", error);
     });
 
     // Salesman inventory check
@@ -225,7 +228,7 @@ const Sales: React.FC = () => {
         setSalesmanInventory(inv);
         setInventoryLoaded(true);
       }, (error) => {
-        console.error("Salesman inventory listener error:", error);
+        if (import.meta.env.DEV) console.error("Salesman inventory listener error:", error);
       });
     } else if (userRole === 'admin') {
       setInventoryLoaded(true);
@@ -257,13 +260,12 @@ const Sales: React.FC = () => {
     const safetyTimer = setTimeout(() => {
       setIsSaving(false);
       setSubmissionError(`The ${actionName} operation timed out. Please check your connection and try again.`);
-      alert(`The ${actionName} operation timed out. Please check your connection and try again.`);
     }, GLOBAL_SUBMISSION_TIMEOUT);
 
     try {
       await action();
     } catch (error: any) {
-      console.error(`Error during ${actionName}:`, error);
+      if (import.meta.env.DEV) console.error(`Error during ${actionName}:`, error);
       let message = error.message || `An error occurred during ${actionName}`;
       if (error.code === 'unavailable') {
         message = 'No internet connection. Please check your network and try again.';
@@ -273,7 +275,6 @@ const Sales: React.FC = () => {
         message = 'Request timed out. Please try again.';
       }
       setSubmissionError(message);
-      alert(message);
     } finally {
       clearTimeout(safetyTimer);
       setIsSaving(false);
@@ -327,7 +328,7 @@ const Sales: React.FC = () => {
       }
       hasRestored.current = true;
     } catch (e) {
-      console.error("Error restoring sales draft:", e);
+      if (import.meta.env.DEV) console.error("Error restoring sales draft:", e);
       localStorage.removeItem('draft_sales_bill');
       hasRestored.current = true;
     }
@@ -350,12 +351,18 @@ const Sales: React.FC = () => {
         };
         localStorage.setItem('draft_sales_bill', JSON.stringify(formState));
       } catch (e) {
-        console.warn("Failed to auto-save sales draft:", e);
+        // console.warn("Failed to auto-save sales draft:", e);
       }
     }, 1000); // Debounce saves to once per second
 
     return () => clearTimeout(timeoutId);
   }, [billData.items, billData.customer, billData.oldDue, billData.receivedAmount, billDate, isCreating, editingDraftId, isSaving]);
+
+  useEffect(() => {
+    if (!submissionError) return;
+    const timer = setTimeout(() => setSubmissionError(null), 10000);
+    return () => clearTimeout(timer);
+  }, [submissionError]);
 
   const resetForm = () => {
     setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
@@ -390,7 +397,7 @@ const Sales: React.FC = () => {
       setLastVisibleActive(snapshot.docs[snapshot.docs.length - 1] || null);
       setHasMoreActive(snapshot.docs.length === 50);
     } catch (error) {
-      console.error("Error loading more bills:", error);
+      if (import.meta.env.DEV) console.error("Error loading more bills:", error);
     } finally {
       clearTimeout(safetyTimer);
       setIsLoadingMore(false);
@@ -413,7 +420,14 @@ const Sales: React.FC = () => {
 
     setBillData(prev => ({
       ...prev,
-      items: [...prev.items, { itemId: item.id, name: item.name, quantity: '' as any, price: '' as any }]
+      items: [...prev.items, { 
+        itemId: item.id, 
+        name: item.name, 
+        brand: item.brand || '',
+        quantity: '' as any, 
+        price: '' as any,
+        isExtra: !!item.isExtra
+      }]
     }));
 
     // Reset search query but keep dropdown open
@@ -438,14 +452,18 @@ const Sales: React.FC = () => {
       const billItem = newItems[index];
 
       if (updates.quantity !== undefined) {
-        const stockItem = items.find(i => i.id === billItem.itemId);
-        const available = user?.role === 'admin' ? stockItem?.mainStock : (salesmanInventory[billItem.itemId] || 0);
-        
         let safeQty: any = updates.quantity;
         if (safeQty !== '') {
-          // Cap quantity at available stock
-          safeQty = Math.min(Number(safeQty), available || 0);
-          if (safeQty < 0) safeQty = 0;
+          const isExtra = !!billItem.isExtra;
+          const isSalesman = user?.role === 'salesman';
+          const stockItem = items.find(i => i.id === billItem.itemId);
+          const available = isSalesman ? (salesmanInventory[billItem.itemId] || 0) : (stockItem?.mainStock || 0);
+
+          // Only restrict if salesman OR if it's NOT an extra (normal items follow main stock)
+          if (isSalesman || !isExtra) {
+            safeQty = Math.min(Number(safeQty), available);
+          }
+          if (Number(safeQty) < 0) safeQty = 0;
         }
         newItems[index] = { ...billItem, ...updates, quantity: safeQty };
       } else {
@@ -504,8 +522,8 @@ const Sales: React.FC = () => {
       link.download = `Invoice_${bill.billNumber}.pdf`;
       link.click();
     } catch (error) {
-      console.error("Error downloading PDF:", error);
-      alert("Failed to generate PDF for download.");
+      if (import.meta.env.DEV) console.error("Error downloading PDF:", error);
+      setSubmissionError("Failed to generate PDF for download.");
     }
   };
 
@@ -518,7 +536,7 @@ const Sales: React.FC = () => {
           const invDoc = await checkDocWithTimeout(invRef);
           const currentQty = invDoc.exists() ? invDoc.data()?.quantity : 0;
           if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentQty}`);
-        } else {
+        } else if (!billItem.isExtra) {
           const itemRef = doc(db, 'items', billItem.itemId);
           const itemDoc = await checkDocWithTimeout(itemRef);
           const currentStock = itemDoc.data()?.mainStock || 0;
@@ -533,7 +551,7 @@ const Sales: React.FC = () => {
         if (user!.role === 'salesman') {
           const invRef = doc(db, `inventories/${user!.id}/items`, billItem.itemId);
           batch.update(invRef, { quantity: increment(-billItem.quantity) });
-        } else {
+        } else if (!billItem.isExtra) {
           const itemRef = doc(db, 'items', billItem.itemId);
           batch.update(itemRef, { mainStock: increment(-billItem.quantity) });
         }
@@ -566,7 +584,8 @@ const Sales: React.FC = () => {
             rate: Number(i.price),
             qty: Number(i.quantity),
             unit: itemInfo?.unit || 'pcs',
-            subtotal: Number(i.price) * Number(i.quantity)
+            subtotal: Number(i.price) * Number(i.quantity),
+            is_extra: i.isExtra
           };
         }),
         total_amount: billToFinalize.subtotal,
@@ -584,16 +603,16 @@ const Sales: React.FC = () => {
 
   const handleSaveBill = async (status: 'draft' | 'finalized') => {
     if (!billData.customer) {
-      alert("Please select a customer");
+      setSubmissionError("Please select a customer");
       return;
     }
     if (billData.items.length === 0) {
-      alert("Please add at least one item");
+      setSubmissionError("Please add at least one item");
       return;
     }
     const invalidItems = billData.items.some(i => i.quantity === '' || Number(i.quantity) <= 0 || i.price === '' || Number(i.price) < 0);
     if (invalidItems) {
-      alert("Please ensure all items have a valid quantity and price");
+      setSubmissionError("Please ensure all items have valid quantity and price");
       return;
     }
     if (!user || isSaving) return;
@@ -604,47 +623,7 @@ const Sales: React.FC = () => {
     minD.setDate(minD.getDate() - 7);
     const minStr = minD.toISOString().split('T')[0];
     if (billDate > todayStr || billDate < minStr) {
-      alert("Invalid date. You can only pick dates from today up to 7 days back.");
-      return;
-    }
-
-    if (status === 'finalized' && !showFinalizeOverlay) {
-      handleAsyncAction(async () => {
-        const subtotal = calculateSubtotal();
-        const grandTotal = calculateGrandTotal();
-        const newBalance = calculateNewBalance();
-        
-        const blob = await generateInvoicePDF({
-          title: 'SALES BILL',
-          themeColor: '#dc2626',
-          salesman_name: user?.name || 'Staff',
-          date_issued: new Date(billDate).toLocaleDateString('en-IN', {
-            day: '2-digit',
-            month: '2-digit',
-            year: 'numeric'
-          }),
-          invoice_no: editingDraftId ? draftBills.find(d => d.id === editingDraftId)?.billNumber || 'DRAFT' : 'DRAFT',
-          customer_name: billData.customer!.name,
-          items: billData.items.map(i => {
-            const itemInfo = items.find(item => item.id === i.itemId);
-            return {
-              item_name: i.name,
-              brand: itemInfo?.brand || '-',
-              rate: Number(i.price),
-              qty: Number(i.quantity),
-              unit: itemInfo?.unit || 'pcs',
-              subtotal: Number(i.price) * Number(i.quantity)
-            };
-          }),
-          total_amount: subtotal,
-          old_due: Number(billData.oldDue || 0),
-          receipt_amount: Number(billData.receivedAmount || 0),
-          new_balance: newBalance
-        });
-        const url = URL.createObjectURL(blob);
-        setPdfPreviewUrl(url);
-        setShowFinalizeOverlay(true);
-      }, "generating preview");
+      setSubmissionError("Invalid date. You can only pick dates from today up to 7 days back.");
       return;
     }
 
@@ -656,7 +635,7 @@ const Sales: React.FC = () => {
             const invDoc = await checkDocWithTimeout(invRef);
             const currentQty = invDoc.exists() ? invDoc.data()?.quantity : 0;
             if (currentQty < billItem.quantity) throw new Error(`Insufficient stock for ${billItem.name}. Available: ${currentQty}`);
-          } else {
+          } else if (!billItem.isExtra) {
             const itemRef = doc(db, 'items', billItem.itemId);
             const itemDoc = await checkDocWithTimeout(itemRef);
             const currentStock = itemDoc.data()?.mainStock || 0;
@@ -672,7 +651,7 @@ const Sales: React.FC = () => {
           if (user!.role === 'salesman') {
             const invRef = doc(db, `inventories/${user!.id}/items`, billItem.itemId);
             batch.update(invRef, { quantity: increment(-billItem.quantity) });
-          } else {
+          } else if (!billItem.isExtra) {
             const itemRef = doc(db, 'items', billItem.itemId);
             batch.update(itemRef, { mainStock: increment(-billItem.quantity) });
           }
@@ -698,6 +677,7 @@ const Sales: React.FC = () => {
         entityPhone: billData.customer!.phone,
         items: billData.items.map(i => ({
           ...i,
+          brand: i.brand || items.find(item => item.id === i.itemId)?.brand || '',
           quantity: Number(i.quantity),
           price: Number(i.price)
         })),
@@ -721,42 +701,50 @@ const Sales: React.FC = () => {
       const createdBill = { id: billRef.id, ...billPayload } as any as Bill;
 
       if (status === 'finalized' && createdBill) {
+        setIsCreating(false);
+        localStorage.removeItem('draft_sales_bill');
         setLastFinalizedBill(createdBill);
         
-        const blob = await generateInvoicePDF({
-          title: 'SALES BILL',
-          themeColor: '#dc2626',
-          salesman_name: user?.name || 'Staff',
-          date_issued: new Date(createdBill.date.seconds * 1000).toLocaleDateString(),
-          invoice_no: createdBill.billNumber,
-          customer_name: createdBill.entityName,
-          items: createdBill.items.map(i => {
-            const itemInfo = items.find(item => item.id === i.itemId);
-            return {
-              item_name: i.name,
-              brand: itemInfo?.brand || '-',
-              rate: Number(i.price),
-              qty: Number(i.quantity),
-              unit: itemInfo?.unit || 'pcs',
-              subtotal: Number(i.price) * Number(i.quantity)
-            };
-          }),
-          total_amount: createdBill.subtotal,
-          old_due: Number(createdBill.oldDue || 0),
-          receipt_amount: Number(createdBill.receivedAmount || 0),
-          new_balance: Number(createdBill.newBalance || 0)
-        });
+        try {
+          const blob = await generateInvoicePDF({
+            title: 'SALES BILL',
+            themeColor: '#dc2626',
+            salesman_name: user?.name || 'Staff',
+            date_issued: new Date(createdBill.date.seconds * 1000).toLocaleDateString(),
+            invoice_no: createdBill.billNumber,
+            customer_name: createdBill.entityName,
+            items: createdBill.items.map(i => {
+              const itemInfo = items.find(item => item.id === i.itemId);
+              return {
+                item_name: i.name,
+                brand: itemInfo?.brand || '-',
+                rate: Number(i.price),
+                qty: Number(i.quantity),
+                unit: itemInfo?.unit || 'pcs',
+                subtotal: Number(i.price) * Number(i.quantity),
+                is_extra: i.isExtra
+              };
+            }),
+            total_amount: createdBill.subtotal,
+            old_due: Number(createdBill.oldDue || 0),
+            receipt_amount: Number(createdBill.receivedAmount || 0),
+            new_balance: Number(createdBill.newBalance || 0)
+          });
 
-        if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
-        setPdfPreviewUrl(URL.createObjectURL(blob));
-        if (editingDraftId) alert("Draft finalized successfully!");
+          if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
+          setPdfPreviewUrl(URL.createObjectURL(blob));
+        } catch (pdfError) {
+          console.error("PDF generation failed:", pdfError);
+          setPdfPreviewUrl(null);
+        }
+        setShowFinalizeOverlay(true);
       } else {
         setIsCreating(false);
         setEditingDraftId(null);
         setBillData({ customer: null, items: [], oldDue: '', receivedAmount: '', status: 'draft' });
         setBillDate(new Date().toISOString().split('T')[0]);
         resetForm();
-        if (editingDraftId) alert("Draft saved successfully");
+        // if (editingDraftId) alert("Draft saved successfully");
       }
     }, `saving bill as ${status}`);
   };
@@ -827,10 +815,9 @@ const Sales: React.FC = () => {
     window.open(generateWhatsAppLink(bill.entityPhone || '', message), '_blank');
   };
 
-  const handleDeleteBill = async (bill: Bill) => {
-    const confirmed = window.confirm(`Are you sure you want to delete bill #${bill.billNumber}? Stock will be returned to inventory.`);
-    if (!confirmed) return;
+  const [billToDelete, setBillToDelete] = useState<Bill | null>(null);
 
+  const proceedDeleteBill = async (bill: Bill) => {
     handleAsyncAction(async () => {
       await runTransaction(db, async (transaction) => {
         const billRef = doc(db, 'bills', bill.id);
@@ -879,6 +866,10 @@ const Sales: React.FC = () => {
         transaction.delete(billRef);
       });
     }, "deleting bill");
+  };
+
+  const handleDeleteBill = (bill: Bill) => {
+    setBillToDelete(bill);
   };
 
   if (isCreating) {
@@ -978,25 +969,33 @@ const Sales: React.FC = () => {
 
               <div className="space-y-4">
                 {billData.items.map((item, idx) => (
-                  <div key={item.itemId} className="flex flex-col sm:flex-row items-start sm:items-center gap-4 p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <div key={item.itemId} className={cn(
+                    "flex flex-col sm:flex-row items-start sm:items-center gap-4 p-4 rounded-xl border transition-colors",
+                    item.isExtra ? "bg-amber-50 border-amber-100 shadow-sm" : "bg-slate-50 border-slate-100"
+                  )}>
                     <div className="flex-1 w-full">
-                      <p className="font-bold text-slate-900">{item.name}</p>
-                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-                        Available: {user?.role === 'admin' ? items.find(i => i.id === item.itemId)?.mainStock : (salesmanInventory[item.itemId] || 0)}
+                      <div className="flex items-center gap-2">
+                        <p className="font-bold text-slate-900">{item.name}</p>
+                        {item.isExtra && (
+                          <span className="text-[7px] px-1 py-0.5 bg-amber-100 text-amber-700 border border-amber-200 rounded font-black tracking-widest uppercase">Extra</span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest leading-none mt-1">
+                        {item.isExtra ? 'No main stock tracking' : `Available: ${user?.role === 'admin' ? items.find(i => i.id === item.itemId)?.mainStock : (salesmanInventory[item.itemId] || 0)}`}
                       </p>
                     </div>
                     <div className="flex items-center gap-3 w-full sm:w-auto">
-                      <div className="w-20 sm:w-24">
-                        <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Qty</label>
-                        <input 
-                          type="number" 
-                          value={item.quantity}
-                          min="0"
-                          max={user?.role === 'admin' ? items.find(i => i.id === item.itemId)?.mainStock : (salesmanInventory[item.itemId] || 0)}
-                          onChange={(e) => updateBillItem(idx, { quantity: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
-                          className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
-                        />
-                      </div>
+                          <div className="w-20 sm:w-24">
+                            <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Qty</label>
+                            <input 
+                              type="number" 
+                              value={item.quantity}
+                              min="0"
+                              max={(user?.role === 'admin' && item.isExtra) ? undefined : (user?.role === 'admin' ? items.find(i => i.id === item.itemId)?.mainStock : (salesmanInventory[item.itemId] || 0))}
+                              onChange={(e) => updateBillItem(idx, { quantity: e.target.value === '' ? '' : parseInt(e.target.value) as any })}
+                              className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                            />
+                          </div>
                       <div className="w-24 sm:w-32">
                         <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Price</label>
                         <input 
@@ -1073,17 +1072,31 @@ const Sales: React.FC = () => {
                             onClick={() => {
                               addItemToBill(item);
                             }}
-                            className="w-full text-left px-5 py-4 hover:bg-indigo-50 transition-colors flex justify-between items-center group"
+                            className={cn(
+                              "w-full text-left px-5 py-4 transition-colors flex justify-between items-center group",
+                              item.isExtra ? "hover:bg-amber-50" : "hover:bg-indigo-50"
+                            )}
                           >
                             <div>
-                              <p className="font-bold text-slate-900 group-hover:text-indigo-700">{item.name}</p>
+                              <div className="flex items-center gap-2">
+                                <p className="font-bold text-slate-900 group-hover:text-indigo-700">{item.name}</p>
+                                {item.isExtra && (
+                                  <span className="text-[7px] px-1 py-0.5 bg-amber-100 text-amber-700 border border-amber-200 rounded font-black tracking-widest uppercase">Extra</span>
+                                )}
+                              </div>
                               <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">{item.brand} • {item.category}</p>
                             </div>
                             <div className="text-right">
-                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Stock Available</p>
-                              <p className="text-base font-black text-indigo-600">
-                                {user?.role === 'admin' ? item.mainStock : (salesmanInventory[item.id] || 0)}
-                              </p>
+                              {item.isExtra ? (
+                                <p className="text-[10px] text-amber-600 font-black uppercase tracking-tighter italic">Extra Item</p>
+                              ) : (
+                                <>
+                                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Stock Available</p>
+                                  <p className="text-base font-black text-indigo-600">
+                                    {user?.role === 'admin' ? item.mainStock : (salesmanInventory[item.id] || 0)}
+                                  </p>
+                                </>
+                              )}
                             </div>
                           </button>
                         ))}
@@ -1387,14 +1400,22 @@ const Sales: React.FC = () => {
                           <p className="text-xs text-slate-500 font-bold uppercase tracking-[0.1em]">Bill has been finalized and recorded</p>
                         </div>
                         
-                        <div className="bg-white border border-slate-200 rounded-2xl p-2 sm:p-4 shadow-sm">
-                           <div className="aspect-[1/1.4] w-full overflow-x-auto rounded-xl border border-slate-100" style={{ WebkitOverflowScrolling: 'touch' }}>
-                              <iframe 
-                                src={pdfPreviewUrl!} 
-                                className="w-full h-full border-none rounded-xl"
-                                title="Finalized Bill"
-                              />
-                           </div>
+                        <div className="bg-white border border-slate-200 rounded-2xl p-2 sm:p-4 shadow-sm min-h-[200px] flex items-center justify-center">
+                           {pdfPreviewUrl ? (
+                             <div className="aspect-[1/1.4] w-full overflow-x-auto rounded-xl border border-slate-100" style={{ WebkitOverflowScrolling: 'touch' }}>
+                                <iframe 
+                                  src={`${pdfPreviewUrl}#view=FitH`} 
+                                  className="w-full h-full border-none rounded-xl"
+                                  title="Finalized Bill"
+                                />
+                             </div>
+                           ) : (
+                             <div className="flex flex-col items-center justify-center p-8 bg-slate-50 rounded-xl w-full">
+                               <CheckCircle2 className="w-12 h-12 text-emerald-500 mb-4" />
+                               <p className="text-slate-900 font-bold mb-1">Bill Recorded Successfully!</p>
+                               <p className="text-slate-500 text-xs text-center max-w-[240px]">PDF preview is not available on this device, but you can still share the bill summary via WhatsApp.</p>
+                             </div>
+                           )}
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1405,30 +1426,34 @@ const Sales: React.FC = () => {
                             <Send className="w-4 h-4 sm:w-5 h-5" />
                             WhatsApp Share
                           </button>
-                          <button 
-                             onClick={() => {
-                               const link = document.createElement('a');
-                               link.href = pdfPreviewUrl!;
-                               link.download = `Invoice_${lastFinalizedBill.billNumber}.pdf`;
-                               link.click();
-                             }}
-                             className="py-3.5 sm:py-4 bg-blue-600 text-white font-black rounded-2xl hover:bg-blue-700 shadow-xl shadow-blue-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs"
-                          >
-                            <Download className="w-4 h-4 sm:w-5 h-5" />
-                            Download PDF
-                          </button>
+                          {pdfPreviewUrl && (
+                            <button 
+                               onClick={() => {
+                                 const link = document.createElement('a');
+                                 link.href = pdfPreviewUrl;
+                                 link.download = `Invoice_${lastFinalizedBill.billNumber}.pdf`;
+                                 link.click();
+                               }}
+                               className="py-3.5 sm:py-4 bg-blue-600 text-white font-black rounded-2xl hover:bg-blue-700 shadow-xl shadow-blue-100 transition-all flex items-center justify-center gap-2 uppercase tracking-widest text-[10px] sm:text-xs"
+                            >
+                              <Download className="w-4 h-4 sm:w-5 h-5" />
+                              Download PDF
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
 
                     <div className="p-4 sm:p-6 bg-white border-t sticky bottom-0 z-20 flex flex-col items-stretch gap-3">
-                      <button 
-                        onClick={() => window.open(pdfPreviewUrl!, '_blank')}
-                        className="w-full py-4 bg-slate-100 text-slate-700 font-black rounded-2xl hover:bg-slate-200 transition-all uppercase tracking-widest text-[10px] sm:text-xs flex items-center justify-center gap-2"
-                      >
-                        <ExternalLink className="w-5 h-5" />
-                        Open Full Preview
-                      </button>
+                      {pdfPreviewUrl && (
+                        <button 
+                          onClick={() => window.open(pdfPreviewUrl, '_blank')}
+                          className="w-full py-4 bg-slate-100 text-slate-700 font-black rounded-2xl hover:bg-slate-200 transition-all uppercase tracking-widest text-[10px] sm:text-xs flex items-center justify-center gap-2"
+                        >
+                          <ExternalLink className="w-5 h-5" />
+                          Open Full Preview
+                        </button>
+                      )}
                       <button 
                         onClick={() => {
                           setShowFinalizeOverlay(false);
@@ -1528,26 +1553,41 @@ const Sales: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2 pt-4 border-t border-slate-50">
-                <button 
-                  onClick={() => shareBillOnWhatsApp(bill)}
-                  className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-indigo-50 text-indigo-600 rounded-xl font-bold text-[10px] uppercase tracking-widest hover:bg-indigo-100 transition-colors"
-                >
-                  <Printer className="w-4 h-4" />
-                  Print / Share
-                </button>
-                <button 
-                  onClick={() => handleDownloadBill(bill)}
-                  className="p-2.5 bg-slate-50 text-slate-400 hover:text-indigo-600 rounded-xl transition-colors"
-                  title="Download PDF"
-                >
-                  <Download className="w-4 h-4" />
-                </button>
-                <button 
-                  onClick={() => handleDeleteBill(bill)}
-                  className="p-2.5 text-slate-300 hover:text-rose-500 transition-colors"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                {billToDelete?.id === bill.id ? (
+                  <div className="flex-1 flex items-center justify-between bg-red-50 p-2 sm:p-3 rounded-xl border border-red-100 animate-in fade-in slide-in-from-bottom-1 duration-200">
+                    <div className="flex flex-col">
+                      <span className="text-[9px] font-black text-red-600 uppercase tracking-tighter">Confirm Delete?</span>
+                      <span className="text-[8px] text-red-400 font-bold uppercase tracking-widest">Restores stock</span>
+                    </div>
+                    <div className="flex gap-2">
+                       <button onClick={() => setBillToDelete(null)} className="px-3 py-1.5 bg-white border border-red-100 text-red-600 text-[10px] rounded-lg font-black uppercase tracking-tighter hover:bg-red-50 transition-colors">No</button>
+                       <button onClick={() => { proceedDeleteBill(bill); setBillToDelete(null); }} className="px-3 py-1.5 bg-red-600 text-white text-[10px] rounded-lg font-black uppercase tracking-tighter hover:bg-red-700 shadow-sm transition-all active:scale-95">Yes</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <button 
+                      onClick={() => shareBillOnWhatsApp(bill)}
+                      className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-indigo-50 text-indigo-600 rounded-xl font-bold text-[10px] uppercase tracking-widest hover:bg-indigo-100 transition-colors"
+                    >
+                      <Printer className="w-4 h-4" />
+                      Print / Share
+                    </button>
+                    <button 
+                      onClick={() => handleDownloadBill(bill)}
+                      className="p-2.5 bg-slate-50 text-slate-400 hover:text-indigo-600 rounded-xl transition-colors"
+                      title="Download PDF"
+                    >
+                      <Download className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={() => handleDeleteBill(bill)}
+                      className="p-2.5 text-slate-300 hover:text-rose-500 transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </>
+                )}
               </div>
             </motion.div>
           ))}
@@ -1606,30 +1646,42 @@ const Sales: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2 pt-4 border-t border-slate-50">
-                <button 
-                  onClick={() => setViewingDraft(bill)}
-                  className="px-3 py-2 bg-slate-50 text-slate-600 rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-slate-100"
-                >
-                  View
-                </button>
-                <button 
-                  onClick={() => handleEditDraft(bill)}
-                  className="px-3 py-2 bg-indigo-50 text-indigo-600 rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-indigo-100"
-                >
-                  Edit
-                </button>
-                <button 
-                  onClick={() => setIsFinalizing(bill)}
-                  className="flex-1 py-2 bg-emerald-600 text-white rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-emerald-700 shadow-sm"
-                >
-                  Finalize
-                </button>
-                <button 
-                  onClick={() => handleDeleteBill(bill)}
-                  className="p-2 text-slate-300 hover:text-rose-500 transition-colors"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                {billToDelete?.id === bill.id ? (
+                  <div className="flex-1 flex items-center justify-between bg-red-50 p-2 rounded-xl border border-red-100 animate-in fade-in slide-in-from-bottom-1 duration-200">
+                    <span className="text-[10px] font-black text-red-600 uppercase ml-2">Confirm Delete?</span>
+                    <div className="flex gap-2">
+                       <button onClick={() => setBillToDelete(null)} className="px-3 py-1.5 bg-white border border-red-100 text-red-600 text-[10px] rounded-lg font-black uppercase tracking-tighter">No</button>
+                       <button onClick={() => { proceedDeleteBill(bill); setBillToDelete(null); }} className="px-3 py-1.5 bg-red-600 text-white text-[10px] rounded-lg font-black uppercase tracking-tighter shadow-sm">Yes</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <button 
+                      onClick={() => setViewingDraft(bill)}
+                      className="px-3 py-2 bg-slate-50 text-slate-600 rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-slate-100"
+                    >
+                      View
+                    </button>
+                    <button 
+                      onClick={() => handleEditDraft(bill)}
+                      className="px-3 py-2 bg-indigo-50 text-indigo-600 rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-indigo-100"
+                    >
+                      Edit
+                    </button>
+                    <button 
+                      onClick={() => setIsFinalizing(bill)}
+                      className="flex-1 py-2 bg-emerald-600 text-white rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-emerald-700 shadow-sm"
+                    >
+                      Finalize
+                    </button>
+                    <button 
+                      onClick={() => handleDeleteBill(bill)}
+                      className="p-2 text-slate-300 hover:text-rose-500 transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </>
+                )}
               </div>
             </motion.div>
           ))}

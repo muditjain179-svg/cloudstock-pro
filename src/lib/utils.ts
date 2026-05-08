@@ -42,13 +42,17 @@ export async function generateInvoicePDF(data: {
   date_issued: string;
   invoice_no: string;
   customer_name: string;
-  items: Array<{ item_name: string; rate: number; qty: number; subtotal: number; unit?: string; brand?: string }>;
+  items: Array<{ item_name: string; rate: number; qty: number; subtotal: number; unit?: string; brand?: string; is_extra?: boolean }>;
   total_amount: number;
   old_due: number;
   receipt_amount: number;
   new_balance: number;
 }) {
   const rgb = hexToRgb(data.themeColor);
+  const processedItems = data.items.map(i => ({
+    ...i,
+    item_name: i.is_extra ? `${i.item_name} [EXTRA]` : i.item_name
+  }));
   
   // Keep the original HTML template for reference and potential use in other parts of the app
   const html = `
@@ -95,7 +99,7 @@ export async function generateInvoicePDF(data: {
                       </tr>
                   </thead>
                   <tbody>
-                      ${data.items.map((item, idx) => `
+                      ${processedItems.map((item, idx) => `
                           <tr>
                               <td style="padding: 12px; border-bottom: 1px solid #eee; font-size: 0.85rem; color: #000;">${idx + 1}</td>
                               <td style="padding: 12px; border-bottom: 1px solid #eee; font-size: 0.9rem; color: #000;">${item.brand || '-'}</td>
@@ -205,7 +209,7 @@ export async function generateInvoicePDF(data: {
   autoTable(doc, {
     startY: 125,
     head: [['SN', 'BRAND', 'ITEM', 'QTY', 'RATE', 'SUB TOTAL']],
-    body: data.items.map((item, idx) => [
+    body: processedItems.map((item, idx) => [
       String(idx + 1),
       item.brand || '-',
       item.item_name,
@@ -327,9 +331,13 @@ export async function generateTransferPDF(data: {
   date_issued: string;
   transfer_no: string;
   receiver_name: string;
-  items: Array<{ item_name: string; qty: number; brand?: string }>;
+  items: Array<{ item_name: string; qty: number; brand?: string; is_extra?: boolean }>;
 }) {
   const rgb = hexToRgb(data.themeColor);
+  const processedItems = data.items.map(i => ({
+    ...i,
+    item_name: i.is_extra ? `${i.item_name} [EXTRA]` : i.item_name
+  }));
   const doc = new jsPDF();
   
   // Design matching Invoice
@@ -390,7 +398,7 @@ export async function generateTransferPDF(data: {
   autoTable(doc, {
     startY: 125,
     head: [['SN', 'BRAND', 'ITEM NAME', 'QUANTITY']],
-    body: data.items.map((item, idx) => [
+    body: processedItems.map((item, idx) => [
       String(idx + 1),
       item.brand || '-',
       item.item_name,

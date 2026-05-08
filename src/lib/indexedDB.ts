@@ -38,7 +38,7 @@ export async function saveToIndexedDB(key: string, data: any[]): Promise<void> {
       tx.onerror = () => resolve();
     });
   } catch (e) {
-    console.warn('IndexedDB save failed:', e);
+    if (import.meta.env.DEV) console.warn('IndexedDB save failed:', e);
   }
 }
 
