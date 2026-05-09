@@ -79,3 +79,16 @@ export interface Bill {
   createdBy: string;
   status: BillStatus;
 }
+
+export interface StockAdjustment {
+  id: string;
+  itemId: string;
+  itemName: string;
+  oldStock: number;
+  newStock: number;
+  difference: number;
+  adjustedBy: string;
+  adminName: string;
+  timestamp: any;
+  reason?: string;
+}

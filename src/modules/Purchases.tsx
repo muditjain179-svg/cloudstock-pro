@@ -58,6 +58,9 @@ const Purchases: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
+  
+  // Duplicate prevention
+  const [lastSubmission, setLastSubmission] = useState<{ hash: string, time: number } | null>(null);
 
   const [itemSearch, setItemSearch] = useState('');
   const [showItemSearch, setShowItemSearch] = useState(false);
@@ -340,6 +343,9 @@ const Purchases: React.FC = () => {
     setBillDate(new Date().toISOString().split('T')[0]);
     setIsCreating(false);
     setEditingDraftId(null);
+    setLastFinalizedBill(null);
+    setPdfPreviewUrl(null);
+    setShowFinalizeOverlay(false);
     localStorage.removeItem('draft_purchase_bill');
   };
 
@@ -542,6 +548,7 @@ const Purchases: React.FC = () => {
       status: 'draft'
     });
     setEditingDraftId(draft.id);
+    setBillDate(new Date(draft.date.seconds * 1000).toISOString().split('T')[0]);
     setIsCreating(true);
   };
 
@@ -632,6 +639,64 @@ const Purchases: React.FC = () => {
     }, "finalizing bill");
   };
 
+  const handlePreviewBill = async () => {
+    if (!billData.supplier) {
+      setSubmissionError("Please select a supplier");
+      return;
+    }
+    if (billData.items.length === 0) {
+      setSubmissionError("Please add at least one item");
+      return;
+    }
+    const invalidItems = billData.items.some(i => i.quantity === '' || Number(i.quantity) <= 0 || i.price === '' || Number(i.price) < 0);
+    if (invalidItems) {
+      setSubmissionError("Please ensure all items have valid quantity and price");
+      return;
+    }
+    if (!user || user.role !== 'admin' || isSaving) return;
+
+    handleAsyncAction(async () => {
+      // Just generate PDF for preview, DO NOT commit to Firestore
+      const subtotalValue = calculateSubtotal();
+      const grandTotalValue = calculateGrandTotal();
+      const newBalanceValue = calculateNewBalance();
+
+      try {
+        const blob = await generateInvoicePDF({
+          title: 'PURCHASE ORDER (PREVIEW)',
+          themeColor: '#64748b',
+          salesman_name: user?.name || 'Admin',
+          date_issued: new Date(billDate).toLocaleDateString(),
+          invoice_no: 'DRAFT',
+          customer_name: billData.supplier!.name,
+          items: billData.items.map(i => {
+            const itemInfo = items.find(item => item.id === i.itemId);
+            return {
+              item_name: i.name,
+              brand: itemInfo?.brand || '-',
+              rate: Number(i.price),
+              qty: Number(i.quantity),
+              unit: itemInfo?.unit || 'pcs',
+              subtotal: Number(i.price) * Number(i.quantity),
+              is_extra: i.isExtra
+            };
+          }),
+          total_amount: subtotalValue,
+          old_due: Number(billData.oldDue || 0),
+          receipt_amount: Number(billData.receivedAmount || 0),
+          new_balance: newBalanceValue
+        });
+
+        if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
+        setPdfPreviewUrl(URL.createObjectURL(blob));
+        setShowFinalizeOverlay(true);
+      } catch (pdfError) {
+        console.error("PDF generation failed:", pdfError);
+        setSubmissionError("Failed to generate preview. Try finalizing directly.");
+      }
+    }, "generating preview");
+  };
+
   const handleSaveBill = async (status: 'draft' | 'finalized') => {
     if (!billData.supplier) {
       setSubmissionError("Please select a supplier");
@@ -647,6 +712,18 @@ const Purchases: React.FC = () => {
       return;
     }
     if (!user || user.role !== 'admin' || isSaving) return;
+
+    // Duplicate Prevention Check (10s window)
+    const currentBillHash = JSON.stringify({
+      supplier: billData.supplier?.id,
+      items: billData.items.map(i => ({ id: i.itemId, qty: i.quantity, price: i.price })),
+      total: calculateSubtotal()
+    });
+
+    if (lastSubmission && lastSubmission.hash === currentBillHash && (Date.now() - lastSubmission.time) < 10000) {
+      setSubmissionError("Duplicate bill detected. Please wait 10 seconds or modify the bill.");
+      return;
+    }
 
     // Date Validation
     const todayStr = new Date().toISOString().split('T')[0];
@@ -737,10 +814,11 @@ const Purchases: React.FC = () => {
       
       await batch.commit();
       
+      setLastSubmission({ hash: currentBillHash, time: Date.now() });
+
       const createdBill = { id: newBillRef.id, ...newBillData } as any as Bill;
 
       if (status === 'finalized') {
-        setIsCreating(false);
         setLastFinalizedBill(createdBill);
         
         try {
@@ -1183,7 +1261,7 @@ const Purchases: React.FC = () => {
                   )}
                 </AnimatePresence>
                 <button 
-                  onClick={() => handleSaveBill('finalized')}
+                  onClick={handlePreviewBill}
                   disabled={isSaving}
                   className="w-full py-4 bg-indigo-600 text-white font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-[0.98] text-xs uppercase disabled:opacity-50"
                 >
@@ -1399,8 +1477,14 @@ const Purchases: React.FC = () => {
                         </button>
                       </div>
                     </div>
-                    <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-50">
-                      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden min-h-[600px] sm:min-h-[700px] relative w-full">
+                      <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-50">
+                        {submissionError && (
+                          <div className="mb-4 p-4 bg-rose-50 border border-rose-100 rounded-2xl flex items-center gap-3 text-rose-600 animate-in slide-in-from-top-2 duration-300">
+                            <X className="w-5 h-5 shrink-0" />
+                            <p className="text-xs font-bold leading-tight">{submissionError}</p>
+                          </div>
+                        )}
+                        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden min-h-[600px] sm:min-h-[700px] relative w-full">
                         {pdfPreviewUrl ? (
                           <div className="w-full h-full overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
                             <iframe 
@@ -1889,6 +1973,12 @@ const Purchases: React.FC = () => {
                 <CheckCircle2 className="w-8 h-8" />
               </div>
               <h2 className="text-xl font-black text-slate-900 mb-2 tracking-tight">Finalize Purchase?</h2>
+              {submissionError && (
+                <div className="mb-4 p-3 bg-rose-50 border border-rose-100 rounded-xl flex items-center gap-2 text-rose-600 animate-in slide-in-from-top-1 duration-200">
+                  <X className="w-4 h-4 shrink-0" />
+                  <p className="text-[10px] font-bold leading-tight text-left">{submissionError}</p>
+                </div>
+              )}
               <div className="bg-slate-50 rounded-xl p-4 mb-6 space-y-1 text-sm text-slate-700 font-bold">
                 <div className="flex justify-between"><span>Bill No:</span> <span>{isFinalizing.billNumber}</span></div>
                 <div className="flex justify-between"><span>Supplier:</span> <span>{isFinalizing.entityName}</span></div>

@@ -52,6 +52,10 @@ const Transfers: React.FC = () => {
   const [isOpeningStock, setIsOpeningStock] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
+  
+  // Duplicate prevention
+  const [lastSubmission, setLastSubmission] = useState<{ hash: string, time: number } | null>(null);
+
   const [itemSearch, setItemSearch] = useState('');
   const [showItemSearch, setShowItemSearch] = useState(false);
 
@@ -260,12 +264,12 @@ const Transfers: React.FC = () => {
   }, [submissionError]);
 
   const resetForm = () => {
-    const type = isOpeningStock ? 'opening_stock' : 'transfer';
-    setBillData({ salesman: null, items: [] });
-    setBillDate(new Date().toISOString().split('T')[0]);
     setIsCreating(false);
     setIsOpeningStock(false);
-    localStorage.removeItem(`draft_${type}`);
+    setLastFinalizedBill(null);
+    setPdfPreviewUrl(null);
+    localStorage.removeItem('draft_opening_stock');
+    localStorage.removeItem('draft_transfer');
   };
 
   const handleTransfer = async () => {
@@ -283,6 +287,18 @@ const Transfers: React.FC = () => {
       return;
     }
     if (!user || isSaving) return;
+
+    // Duplicate Prevention Check (10s window)
+    const currentBillHash = JSON.stringify({
+      salesman: billData.salesman?.id,
+      items: billData.items.map(i => ({ id: i.itemId, qty: i.quantity })),
+      isOpening: isOpeningStock
+    });
+
+    if (lastSubmission && lastSubmission.hash === currentBillHash && (Date.now() - lastSubmission.time) < 10000) {
+      setSubmissionError("Duplicate transfer detected. Please wait 10 seconds or modify the items.");
+      return;
+    }
 
     // Date Validation
     const todayStr = new Date().toISOString().split('T')[0];
@@ -418,6 +434,8 @@ const Transfers: React.FC = () => {
       batch.set(newBillRef, billPayload);
       
       await batch.commit();
+
+      setLastSubmission({ hash: currentBillHash, time: Date.now() });
       
       const createdBill = { id: newBillRef.id, ...billPayload } as any as Bill;
 
@@ -445,7 +463,10 @@ const Transfers: React.FC = () => {
 
         if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
         setPdfPreviewUrl(URL.createObjectURL(blob));
-        resetForm();
+        // Reset form data but DON'T call setIsCreating(false) yet
+        setBillData({ salesman: null, items: [] });
+        setItemSearch('');
+        setBillDate(new Date().toISOString().split('T')[0]);
       } else {
         setIsCreating(false);
         setIsOpeningStock(false);
@@ -968,6 +989,12 @@ const Transfers: React.FC = () => {
                       </button>
                     </div>
                     <div className="flex-1 overflow-hidden p-4 sm:p-6 bg-slate-100 flex flex-col gap-4">
+                      {submissionError && (
+                        <div className="p-4 bg-rose-50 border border-rose-100 rounded-2xl flex items-center gap-3 text-rose-600 animate-in slide-in-from-top-2 duration-300">
+                          <X className="w-5 h-5 shrink-0" />
+                          <p className="text-xs font-bold leading-tight">{submissionError}</p>
+                        </div>
+                      )}
                       <div className="bg-white rounded-2xl shadow-inner border border-slate-200 overflow-hidden flex-1 relative">
                         {pdfPreviewUrl ? (
                           <iframe 

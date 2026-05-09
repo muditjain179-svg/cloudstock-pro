@@ -108,6 +108,22 @@
         "status": { "type": "string", "enum": ["draft", "finalized"] }
       },
       "required": ["billNumber", "type", "date", "items", "createdBy"]
+    },
+    "StockAdjustment": {
+      "title": "Stock Adjustment Log",
+      "description": "Records of manual stock adjustments via Excel",
+      "type": "object",
+      "properties": {
+        "itemId": { "type": "string" },
+        "itemName": { "type": "string" },
+        "oldStock": { "type": "number" },
+        "newStock": { "type": "number" },
+        "difference": { "type": "number" },
+        "adjustedBy": { "type": "string" },
+        "adminName": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["itemId", "itemName", "oldStock", "newStock", "difference", "adjustedBy", "timestamp"]
     }
   },
   "firestore": {
@@ -142,6 +158,10 @@
     "/bills/{billId}": {
       "schema": "Bill",
       "description": "Sales, purchases, and transfer history"
+    },
+    "/stock_adjustments/{adjustmentId}": {
+      "schema": "StockAdjustment",
+      "description": "Log of stock adjustments made via Excel"
     }
   }
 }

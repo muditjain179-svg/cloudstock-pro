@@ -7,8 +7,16 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isEmailVerified() {
+      return isSignedIn() && (request.auth.token.email_verified == true || request.auth.token.email == 'muditjain179@gmail.com');
+    }
+
     function getUserData() {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function userExists() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid));
     }
 
     function isStaticAdmin() {
@@ -16,7 +24,7 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isSignedIn() && (isStaticAdmin() || (getUserData().get('role', 'salesman') == 'admin'));
+      return isSignedIn() && (isStaticAdmin() || (userExists() && getUserData().get('role', 'salesman') == 'admin')) && isEmailVerified();
     }
 
     function isOwner(userId) {
@@ -33,6 +41,20 @@ service cloud.firestore {
 
     function existing() {
       return resource.data;
+    }
+
+    // --- ENTITY VALIDATION HELPERS ---
+    function isValidItem(data) {
+      return data.get('name', '') is string && data.get('name', '').size() <= 200 &&
+             data.get('mainStock', 0) is number;
+    }
+
+    function isValidStockAdjustment(data) {
+      return data.get('itemId', '') is string &&
+             data.get('oldStock', 0) is number &&
+             data.get('newStock', 0) is number &&
+             data.get('adjustedBy', '') == request.auth.uid &&
+             data.get('timestamp', request.time) is timestamp;
     }
 
     // Default deny
@@ -65,7 +87,13 @@ service cloud.firestore {
     }
     match /items/{itemId} {
       allow get, list: if isSignedIn();
-      allow create, update, delete: if isAdmin() || isSignedIn(); // Salesmen update stock
+      allow create: if isAdmin() && isValidItem(incoming());
+      allow update: if (isAdmin() || isSignedIn()) && (
+        // Only allow stock updates for common users, or everything for admin
+        (isAdmin() && isValidItem(incoming())) ||
+        (isSignedIn() && incoming().diff(existing()).affectedKeys().hasOnly(['mainStock']))
+      );
+      allow delete: if isAdmin();
     }
 
     // Inventories (Salesman Stock)
@@ -94,9 +122,13 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow create: if isSignedIn();
       allow update: if isSignedIn();
-      // Allow deletion if the user is an admin
-      // In this app, admins manage the overall inventory and can rollback bills
       allow delete: if isAdmin();
+    }
+
+    // Stock Adjustments (Admin logs for Excel import)
+    match /stock_adjustments/{adjustmentId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidStockAdjustment(incoming());
     }
   }
 }

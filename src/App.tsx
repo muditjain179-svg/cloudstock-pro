@@ -1,6 +1,6 @@
 import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate, useLocation } from 'react-router-dom';
-import { LogOut, LayoutDashboard, Package, ShoppingCart, Truck, Users, Menu, X, Tag, Layers, Wifi, WifiOff, AlertTriangle } from 'lucide-react';
+import { LogOut, LayoutDashboard, Package, ShoppingCart, Truck, Users, Menu, X, Tag, Layers, Wifi, WifiOff, AlertTriangle, ArrowRightLeft } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { collection, onSnapshot, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from './lib/firebase';
@@ -19,6 +19,7 @@ const Transfers = lazy(() => import('./modules/Transfers'));
 const Brands = lazy(() => import('./modules/Brands'));
 const Categories = lazy(() => import('./modules/Categories'));
 const Staff = lazy(() => import('./modules/Staff'));
+const Flow = lazy(() => import('./modules/Flow'));
 
 // Protected Route
 const ProtectedRoute: React.FC<{ children: React.ReactNode; adminOnly?: boolean }> = ({ children, adminOnly }) => {
@@ -112,6 +113,7 @@ const MainLayout: React.FC = () => {
     { label: 'Categories', path: '/categories', icon: Layers, roles: ['admin'] },
     { label: 'Customers', path: '/customers', icon: Users, roles: ['admin', 'salesman'] },
     { label: 'Suppliers', path: '/suppliers', icon: Users, roles: ['admin'] },
+    { label: 'Flow', path: '/flow', icon: ArrowRightLeft, roles: ['admin', 'salesman'] },
     { label: 'Staff', path: '/staff', icon: Users, roles: ['admin'] },
   ];
 
@@ -230,6 +232,7 @@ const MainLayout: React.FC = () => {
             <Route path="/categories" element={<ProtectedRoute adminOnly><Categories /></ProtectedRoute>} />
             <Route path="/transfers" element={<Transfers />} />
             <Route path="/staff" element={<ProtectedRoute adminOnly><Staff /></ProtectedRoute>} />
+            <Route path="/flow" element={<Flow />} />
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>
         </Suspense>

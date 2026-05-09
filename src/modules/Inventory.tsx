@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import Fuse from 'fuse.js';
+import * as XLSX from 'xlsx';
 import { 
   addDoc, 
   updateDoc, 
@@ -13,12 +14,14 @@ import {
   collection,
   query,
   orderBy,
-  onSnapshot
+  onSnapshot,
+  writeBatch,
+  serverTimestamp
 } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db, auth } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppData } from '../lib/useAppData';
-import { Item, Brand, Category, UserProfile } from '../types';
+import { Item, Brand, Category, UserProfile, StockAdjustment } from '../types';
 import { 
   Plus, 
   Search, 
@@ -33,7 +36,12 @@ import {
   Users,
   ChevronRight,
   Info,
-  CheckCircle2
+  CheckCircle2,
+  FileDown,
+  FileUp,
+  Upload,
+  ArrowRight,
+  Database
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Link } from 'react-router-dom';
@@ -42,6 +50,7 @@ import { cn, generateWhatsAppLink } from '../lib/utils';
 
 const Inventory: React.FC = () => {
   const { user } = useAuth();
+  const [showExcelTools, setShowExcelTools] = useState(false);
   
   const { data: items, isLoading: itemsLoading } = useAppData<Item>('items', [orderBy('name')]);
   const { data: brands } = useAppData<Brand>('brands', [orderBy('name')]);
@@ -76,6 +85,9 @@ const Inventory: React.FC = () => {
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [itemStockBreakdown, setItemStockBreakdown] = useState<Array<{ salesmanName: string, quantity: number }>>([]);
+
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [adjustments, setAdjustments] = useState<Array<{ item: Item, oldQty: number, newQty: number, diff: number }>>([]);
 
   const mainItemsCount = useMemo(() => items.filter(i => !i.isExtra).length, [items]);
   const extrasCount = useMemo(() => items.filter(i => i.isExtra).length, [items]);
@@ -215,10 +227,10 @@ const Inventory: React.FC = () => {
         isExtra: activeTab === 'extras',
         openingBalance: activeTab === 'extras' ? 0 : Number(formData.openingBalance),
         lowStockThreshold: Number(formData.lowStockThreshold),
-        mainStock: activeTab === 'extras' ? 0 : (editingItem ? (items.find(i => i.id === editingItem.id)?.mainStock || Number(formData.openingBalance)) : Number(formData.openingBalance)),
-        unit: editingItem ? (items.find(i => i.id === editingItem.id)?.unit || 'pcs') : 'pcs',
-        purchasePrice: editingItem ? (items.find(i => i.id === editingItem.id)?.purchasePrice || 0) : 0,
-        sellingPrice: editingItem ? (items.find(i => i.id === editingItem.id)?.sellingPrice || 0) : 0
+        mainStock: activeTab === 'extras' ? 0 : (editingItem ? (items.find(i => i.id === editingItem.id)?.mainStock ?? editingItem.mainStock) : Number(formData.openingBalance)),
+        unit: editingItem ? (items.find(i => i.id === editingItem.id)?.unit ?? editingItem.unit ?? 'pcs') : 'pcs',
+        purchasePrice: editingItem ? (items.find(i => i.id === editingItem.id)?.purchasePrice ?? editingItem.purchasePrice ?? 0) : 0,
+        sellingPrice: editingItem ? (items.find(i => i.id === editingItem.id)?.sellingPrice ?? editingItem.sellingPrice ?? 0) : 0
       };
 
       if (editingItem) {
@@ -338,9 +350,215 @@ const Inventory: React.FC = () => {
     }
   };
 
+  const handleExportExcel = () => {
+    // Generate data for all items, including ID (will be a hidden column if possible, but definitely included)
+    const exportData = items.map(item => ({
+      'Item ID': item.id,
+      'Brand': item.brand || '-',
+      'Item Name': item.name,
+      'Category': item.category || '-',
+      'Unit': item.unit || 'pcs',
+      'Current Main Stock': item.isExtra ? 'N/A' : (item.mainStock || 0)
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(exportData);
+    
+    // Set column widths
+    const wscols = [
+      { wch: 15 }, // ID
+      { wch: 15 }, // Brand
+      { wch: 30 }, // Name
+      { wch: 20 }, // Category
+      { wch: 10 }, // Unit
+      { wch: 20 }, // Stock
+    ];
+    ws['!cols'] = wscols;
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Inventory");
+    
+    // Generate and download
+    const date = new Date().toISOString().split('T')[0];
+    XLSX.writeFile(wb, `Inventory_Check_${date}.xlsx`);
+  };
+
+  const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Security Gate
+    const password = window.prompt("Enter Admin Security Key to Import Adjustments:");
+    if (password !== 'CLOUDSTOCKMUDIT@2009') {
+      setSubmissionError("Invalid Security Key. Database synchronization aborted.");
+      e.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const wb = XLSX.read(bstr, { type: 'binary' });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        const data = XLSX.utils.sheet_to_json<any>(ws);
+
+        const newAdjustments: Array<{ item: Item, oldQty: number, newQty: number, diff: number }> = [];
+
+        data.forEach(row => {
+          const itemId = row['Item ID'];
+          const newQtyStr = row['Current Main Stock'];
+          
+          if (!itemId || newQtyStr === 'N/A' || isNaN(Number(newQtyStr))) return;
+
+          const item = items.find(i => i.id === itemId);
+          if (item && !item.isExtra) {
+            const newQty = Number(newQtyStr);
+            const oldQty = item.mainStock || 0;
+            if (newQty !== oldQty) {
+              newAdjustments.push({
+                item,
+                oldQty,
+                newQty,
+                diff: newQty - oldQty
+              });
+            }
+          }
+        });
+
+        if (newAdjustments.length === 0) {
+          setSubmissionError("No stock differences found in the uploaded file.");
+          setTimeout(() => setSubmissionError(null), 3000);
+          return;
+        }
+
+        setAdjustments(newAdjustments);
+        setIsImportModalOpen(true);
+      } catch (err) {
+        console.error("Error reading file:", err);
+        setSubmissionError("Could not read the Excel file. Please ensure it follows the exported format.");
+      }
+    };
+    reader.readAsBinaryString(file);
+    
+    // Clear input so same file can be selected again
+    e.target.value = '';
+  };
+
+  const handleFirestoreError = (error: any, operationType: 'create' | 'update' | 'delete' | 'list' | 'get' | 'write', path: string | null) => {
+    const errInfo = {
+      error: error instanceof Error ? error.message : String(error),
+      authInfo: {
+        userId: auth.currentUser?.uid,
+        email: auth.currentUser?.email,
+        emailVerified: auth.currentUser?.emailVerified,
+        isAnonymous: auth.currentUser?.isAnonymous,
+      },
+      operationType,
+      path
+    };
+    console.error('Firestore Error Detailed: ', JSON.stringify(errInfo));
+    throw new Error(JSON.stringify(errInfo));
+  };
+
+  const applyBatchAdjustments = async () => {
+    if (!user || adjustments.length === 0 || isSubmitting) return;
+
+    setIsSubmitting(true);
+    const batch = writeBatch(db);
+    const pathsAffected: string[] = [];
+
+    try {
+      adjustments.forEach(adj => {
+        // Update item stock
+        const itemPath = `items/${adj.item.id}`;
+        const itemRef = doc(db, itemPath);
+        pathsAffected.push(itemPath);
+        batch.update(itemRef, {
+          mainStock: adj.newQty
+        });
+
+        // Log adjustment
+        const logPath = `stock_adjustments/${doc(collection(db, 'stock_adjustments')).id}`;
+        const logRef = doc(db, logPath);
+        pathsAffected.push(logPath);
+        const logData: StockAdjustment = {
+          id: logRef.id,
+          itemId: adj.item.id,
+          itemName: adj.item.name,
+          oldStock: adj.oldQty,
+          newStock: adj.newQty,
+          difference: adj.diff,
+          adjustedBy: user.id,
+          adminName: user.name,
+          timestamp: serverTimestamp()
+        };
+        batch.set(logRef, logData);
+      });
+
+      await batch.commit();
+      
+      setIsImportModalOpen(false);
+      setAdjustments([]);
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3000);
+    } catch (err: any) {
+      console.error("Batch update failed:", err);
+      let errorMsg = err.message;
+      if (err.message.includes('permissions')) {
+        errorMsg = "Security Block: You don't have permission to modify these items or log adjustments. Verify your Admin status.";
+        try {
+          handleFirestoreError(err, 'write', pathsAffected.join(', '));
+        } catch (diagErr) {
+          // Keep the cleaner message for UI but log detail to console
+          console.error("Permission Diagnosis:", diagErr);
+        }
+      }
+      setSubmissionError("Adjustment Failed: " + errorMsg);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const generateStockSummaryPDF = () => {
-    const mainItems = items.filter(i => !i.isExtra);
-    const extraItems = items.filter(i => i.isExtra);
+    // FIX 1 — Use filtered items (what user sees)
+    const mainItems = filteredItems.filter(i => !i.isExtra);
+    const extraItems = filteredItems.filter(i => i.isExtra);
+
+    // FIX 5 — Handle Empty Filtered Results
+    if (mainItems.length === 0 && extraItems.length === 0) {
+      setSubmissionError('No items to export. Please adjust your filters.');
+      return;
+    }
+
+    // FIX 2 — Sort specifically for PDF
+    const sortedMainForPDF = [...mainItems].sort((a, b) => {
+      // Sort by brand A→Z first
+      const brandCompare = (a.brand || '').localeCompare(b.brand || '');
+      if (brandCompare !== 0) return brandCompare;
+
+      // Within brand: low stock first
+      const stockA = (user?.role === 'admin' && !selectedSalesmanId)
+        ? a.mainStock
+        : (salesmanInventory[a.id] || 0);
+      const stockB = (user?.role === 'admin' && !selectedSalesmanId)
+        ? b.mainStock
+        : (salesmanInventory[b.id] || 0);
+      
+      const aLow = stockA <= (a.lowStockThreshold || 5);
+      const bLow = stockB <= (b.lowStockThreshold || 5);
+      
+      if (aLow && !bLow) return -1;
+      if (!aLow && bLow) return 1;
+
+      // Within same stock status: A→Z by name
+      return (a.name || '').localeCompare(b.name || '');
+    });
+
+    const sortedExtrasForPDF = [...extraItems].sort((a, b) =>
+      (a.brand || '').localeCompare(b.brand || '') ||
+      (a.name || '').localeCompare(b.name || '')
+    );
 
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.width;
@@ -410,18 +628,8 @@ const Inventory: React.FC = () => {
     else if (filterBrand) filterStatus = `Brand: ${filterBrand}`;
     else if (filterCategory) filterStatus = `Category: ${filterCategory}`;
     else if (searchTerm) filterStatus = `Search: ${searchTerm}`;
+    else filterStatus = 'Sorted A to Z'; // Fallback to indicate default sort
     
-    // Fallback check if filteredItems is already effectively low stock
-    if (!showLowStockOnly && sortedItems.length > 0 && sortedItems.length < items.length) {
-      const isOnlyLowStock = sortedItems.every(item => {
-        const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
-        return stock <= (item.lowStockThreshold || 5);
-      });
-      if (isOnlyLowStock) {
-        filterStatus = 'Low Stock Items Only';
-      }
-    }
-
     const fullLocationText = `${locationBase} — ${filterStatus}`;
     doc.text(fullLocationText.toUpperCase(), 50, 44);
 
@@ -436,51 +644,44 @@ const Inventory: React.FC = () => {
     doc.setFont('helvetica', 'bold');
     doc.text('MAIN INVENTORY ITEMS', 14, 50);
 
+    // FIX 3 — Show Brand on Every Row
     let sn = 1;
-    let lastBrand = '';
-    let brandSubtotal = 0;
     const mainTableBody: any[] = [];
 
-    sortedMainItems.forEach((item, index) => {
-      const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
+    sortedMainForPDF.forEach((item) => {
+      const stock = (user?.role === 'admin' && !selectedSalesmanId)
+        ? (item.mainStock || 0)
+        : (salesmanInventory[item.id] || 0);
       const isLow = stock <= (item.lowStockThreshold || 5);
       const currentBrand = item.brand || '-';
 
-      if (index > 0 && currentBrand !== lastBrand) {
-        mainTableBody.push([
-          '',
-          '',
-          { content: `${lastBrand} Total:`, styles: { halign: 'right', fontStyle: 'bold', fontSize: 10, textColor: [0, 0, 0] } },
-          { content: `${brandSubtotal} units`, styles: { halign: 'center', fontStyle: 'bold', fillColor: [240, 240, 240], fontSize: 10, textColor: [0, 0, 0] } }
-        ]);
-        brandSubtotal = 0;
-      }
+      const rowFill = isLow ? [254, 242, 242] : null;
 
-      const brandDisplay = currentBrand === lastBrand ? '' : currentBrand;
-      const rowStyle = isLow ? { fillColor: [254, 242, 242] } : {};
-      
       mainTableBody.push([
-        { content: String(sn++), styles: { ...rowStyle, textColor: [0, 0, 0] } },
-        { content: brandDisplay, styles: { ...rowStyle, fontStyle: 'bold', textColor: [0, 0, 0] } },
-        { content: item.name, styles: { ...rowStyle, textColor: [0, 0, 0] } },
-        { 
+        {
+          content: String(sn++),
+          styles: { ...(rowFill ? { fillColor: rowFill } : {}), textColor: [0, 0, 0], halign: 'center' }
+        },
+        {
+          content: currentBrand,
+          styles: { ...(rowFill ? { fillColor: rowFill } : {}), fontStyle: 'bold', textColor: [0, 0, 0] }
+        },
+        {
+          content: item.name,
+          styles: { ...(rowFill ? { fillColor: rowFill } : {}), textColor: [0, 0, 0] }
+        },
+        {
           content: String(stock),
-          styles: { ...rowStyle, textColor: isLow ? [220, 38, 38] : [0, 0, 0], fontStyle: isLow ? 'bold' : 'normal' }
+          styles: {
+            ...(rowFill ? { fillColor: rowFill } : {}),
+            textColor: isLow ? [220, 38, 38] : [0, 0, 0],
+            fontStyle: isLow ? 'bold' : 'normal',
+            halign: 'center'
+          }
         }
       ]);
-
-      brandSubtotal += stock;
-      lastBrand = currentBrand;
-
-      if (index === sortedMainItems.length - 1) {
-        mainTableBody.push([
-          '',
-          '',
-          { content: `${currentBrand} Total:`, styles: { halign: 'right', fontStyle: 'bold', fontSize: 10, textColor: [0, 0, 0] } },
-          { content: `${brandSubtotal} units`, styles: { halign: 'center', fontStyle: 'bold', fillColor: [240, 240, 240], fontSize: 10, textColor: [0, 0, 0] } }
-        ]);
-      }
     });
+
 
     autoTable(doc, {
       startY: 54,
@@ -500,55 +701,67 @@ const Inventory: React.FC = () => {
     let currentY = (doc as any).lastAutoTable.finalY + 15;
 
     // EXTRAS SECTION
-    if (pageHeight - currentY < 40) {
-      doc.addPage();
-      currentY = 20;
+    if (sortedExtrasForPDF.length > 0) {
+      if (pageHeight - currentY < 40) {
+        doc.addPage();
+        currentY = 20;
+      }
+
+      doc.setFontSize(12);
+      doc.setDrawColor(245, 158, 11);
+      doc.setTextColor(245, 158, 11); // Amber
+      doc.setFont('helvetica', 'bold');
+      doc.text('EXTRAS CATALOG', 14, currentY);
+      doc.setLineWidth(0.5);
+      doc.line(14, currentY + 2, pageWidth - 14, currentY + 2);
+
+      const extrasTableBody = sortedExtrasForPDF.map((item, idx) => [
+        String(idx + 1),
+        item.brand || '-',
+        item.name,
+        'N/A'
+      ]);
+
+      autoTable(doc, {
+        startY: currentY + 5,
+        head: [['SN', 'BRAND', 'ITEM NAME', 'QTY']],
+        body: extrasTableBody,
+        columnStyles: {
+          0: { cellWidth: 12, halign: 'center' },
+          1: { cellWidth: 35 },
+          2: { cellWidth: 'auto' },
+          3: { cellWidth: 25, halign: 'center' },
+        },
+        headStyles: { fillColor: [245, 158, 11], textColor: 255 },
+        styles: { fontSize: 9, cellPadding: 3, textColor: [0, 0, 0] },
+        alternateRowStyles: { fillColor: [255, 251, 235] },
+      });
+      currentY = (doc as any).lastAutoTable.finalY + 8;
+    } else {
+      currentY = (doc as any).lastAutoTable.finalY + 8;
     }
 
-    doc.setFontSize(12);
-    doc.setDrawColor(245, 158, 11);
-    doc.setTextColor(245, 158, 11); // Amber
-    doc.setFont('helvetica', 'bold');
-    doc.text('EXTRAS CATALOG', 14, currentY);
-    doc.setLineWidth(0.5);
-    doc.line(14, currentY + 2, pageWidth - 14, currentY + 2);
-
-    const extrasTableBody = sortedExtras.map((item, idx) => [
-      String(idx + 1),
-      item.brand || '-',
-      item.name,
-      'N/A'
-    ]);
-
-    autoTable(doc, {
-      startY: currentY + 5,
-      head: [['SN', 'BRAND', 'ITEM NAME', 'QTY']],
-      body: extrasTableBody,
-      columnStyles: {
-        0: { cellWidth: 12, halign: 'center' },
-        1: { cellWidth: 35 },
-        2: { cellWidth: 'auto' },
-        3: { cellWidth: 25, halign: 'center' },
-      },
-      headStyles: { fillColor: [245, 158, 11], textColor: 255 },
-      styles: { fontSize: 9, cellPadding: 3, textColor: [0, 0, 0] },
-      alternateRowStyles: { fillColor: [255, 251, 235] },
-    });
-
-    const finalY = (doc as any).lastAutoTable.finalY + 8;
-    const totalQty = sortedItems.reduce((sum, item) => {
-      const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
-      return sum + (stock || 0);
+    // FIX 4 — Fix totals to use filtered items only
+    const totalMainQty = sortedMainForPDF.reduce((sum, item) => {
+      const stock = (user?.role === 'admin' && !selectedSalesmanId)
+        ? (item.mainStock || 0)
+        : (salesmanInventory[item.id] || 0);
+      return sum + stock;
     }, 0);
-    const lowStockCount = sortedItems.filter(i => {
-      const stock = (user?.role === 'admin' && !selectedSalesmanId) ? i.mainStock : (salesmanInventory[i.id] || 0);
-      return stock <= (i.lowStockThreshold || 5);
+
+    const lowStockCount = sortedMainForPDF.filter(item => {
+      const stock = (user?.role === 'admin' && !selectedSalesmanId)
+        ? (item.mainStock || 0)
+        : (salesmanInventory[item.id] || 0);
+      return stock <= (item.lowStockThreshold || 5);
     }).length;
 
+    const totalExtras = sortedExtrasForPDF.length;
+
     const totalsHeight = 45;
-    const startY = finalY + totalsHeight > pageHeight - 20
+    const startY = currentY + totalsHeight > pageHeight - 20
       ? (doc.addPage(), 20)
-      : finalY;
+      : currentY;
 
     // TOTALS BOX
     doc.setFillColor(245, 245, 245);
@@ -558,35 +771,22 @@ const Inventory: React.FC = () => {
     doc.setLineWidth(1);
     doc.line(14, startY, pageWidth - 14, startY);
 
-    const valX = pageWidth - 20;
-
     doc.setFontSize(10);
     doc.setTextColor(0, 0, 0);
     doc.setFont('helvetica', 'bold');
-    doc.text(`Total Main Items:`, 20, startY + 8);
-    doc.text(`Total Extras:`, 20, startY + 16);
-    doc.text(`Total Main Qty:`, 20, startY + 24);
-    doc.text(`Low Stock Items:`, 20, startY + 32);
-
-    doc.setTextColor(99, 102, 241);
-    doc.text(`${mainItems.length}`, valX, startY + 8, { align: 'right' });
-    doc.text(`${extraItems.length}`, valX, startY + 16, { align: 'right' });
     
-    const totalMainQty = mainItems.reduce((sum, item) => {
-      const stock = (user?.role === 'admin' && !selectedSalesmanId) ? item.mainStock : (salesmanInventory[item.id] || 0);
-      return sum + (stock || 0);
-    }, 0);
-    doc.text(`${totalMainQty} units`, valX, startY + 24, { align: 'right' });
-    
-    doc.setTextColor(220, 38, 38);
-    doc.text(`${lowStockCount}`, valX, startY + 32, { align: 'right' });
-
-    doc.setFontSize(8);
-    doc.setTextColor(0, 0, 0); // Black text
-    doc.setFont('helvetica', 'normal');
+    const totalItems = sortedMainForPDF.length + sortedExtrasForPDF.length;
+    doc.text(`Total Items: ${totalItems}`, 20, startY + 7);
+    doc.text(`Total Qty: ${totalMainQty} units`, 20, startY + 14);
+    doc.text(`Low Stock Items: ${lowStockCount}`, 20, startY + 21);
+    doc.text(`Total Extras: ${totalExtras}`, 20, startY + 28);
     doc.text(`Generated on: ${generatedAt}`, 14, startY + 36);
 
-    doc.save(`Stock-Summary-${today.replace(/\//g, '-')}.pdf`);
+    // FIX 6 — Update File Name to Reflect Filter
+    let fileName = `Stock-Summary-${today.replace(/\//g, '-')}`;
+    if (showLowStockOnly) fileName += '-LowStock';
+    else if (filterBrand) fileName += `-${filterBrand}`;
+    doc.save(`${fileName}.pdf`);
   };
 
   const fuse = useMemo(() => new Fuse(items, {
@@ -697,8 +897,48 @@ const Inventory: React.FC = () => {
             STOCK SUMMARY
           </button>
           {user?.role === 'admin' && (
-            <button 
-              onClick={() => {
+            <React.Fragment>
+              <button 
+                onClick={() => setShowExcelTools(!showExcelTools)}
+                className={cn(
+                  "p-2 rounded-lg transition-all duration-300",
+                  showExcelTools ? "bg-slate-100 text-slate-600 rotate-180" : "text-slate-300 hover:text-slate-400"
+                )}
+                title="Advanced Database Tools"
+              >
+                <Database className="w-4 h-4" />
+              </button>
+
+              {showExcelTools && (
+                <motion.div 
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="flex items-center gap-2"
+                >
+                  <div className="h-8 w-[1px] bg-gray-200 mx-1 hidden sm:block" />
+                  <button 
+                    onClick={handleExportExcel}
+                    className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded text-xs font-bold hover:bg-slate-50 transition-colors shadow-sm"
+                    title="Export current inventory to Excel for verification"
+                  >
+                    <FileDown className="w-4 h-4 text-emerald-600" />
+                    EXPORT EXCEL
+                  </button>
+                  <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded text-xs font-bold hover:bg-slate-50 transition-colors shadow-sm cursor-pointer" title="Upload corrected Excel to sync stock">
+                    <FileUp className="w-4 h-4 text-indigo-600" />
+                    IMPORT ADJUSTED
+                    <input 
+                      type="file" 
+                      accept=".xlsx, .xls" 
+                      onChange={handleFileImport}
+                      className="hidden" 
+                    />
+                  </label>
+                </motion.div>
+              )}
+              <div className="h-8 w-[1px] bg-gray-200 mx-1 hidden sm:block" />
+              <button 
+                onClick={() => {
                 setEditingItem(null);
                 setFormData({ name: '', category: '', brand: '', openingBalance: '' as any, lowStockThreshold: 5 });
                 setModalOpen(true);
@@ -711,9 +951,10 @@ const Inventory: React.FC = () => {
               <Plus className="w-4 h-4" />
               {activeTab === 'extras' ? 'ADD NEW EXTRA ITEM' : 'ADD NEW ITEM'}
             </button>
-          )}
-        </div>
+          </React.Fragment>
+        )}
       </div>
+    </div>
 
       {/* Search & Filter */}
       <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
@@ -1160,6 +1401,101 @@ const Inventory: React.FC = () => {
                   </div>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Excel Adjustment Preview Modal */}
+      <AnimatePresence>
+        {isImportModalOpen && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsImportModalOpen(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-md"
+            />
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl relative z-10 overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-2xl font-black text-slate-900 tracking-tight uppercase">Verify Adjustments</h2>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">
+                      {adjustments.length} items will be updated from your Excel file
+                    </p>
+                  </div>
+                  <div className="w-12 h-12 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-200">
+                    <Upload className="w-6 h-6" />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-0 custom-scrollbar">
+                <table className="w-full text-left border-collapse">
+                  <thead className="sticky top-0 bg-white z-10">
+                    <tr className="border-b border-slate-100 italic">
+                      <th className="px-8 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Item Details</th>
+                      <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Current</th>
+                      <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">New</th>
+                      <th className="px-8 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Adjustment</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {adjustments.map((adj, idx) => (
+                      <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
+                        <td className="px-8 py-5">
+                          <p className="text-[9px] font-black text-indigo-600 uppercase tracking-tighter mb-0.5">{adj.item.brand}</p>
+                          <p className="font-black text-slate-800 text-sm">{adj.item.name}</p>
+                        </td>
+                        <td className="px-4 py-5 font-black text-slate-400 text-sm text-center italic">{adj.oldQty}</td>
+                        <td className="px-4 py-5 font-black text-slate-900 text-sm text-center">{adj.newQty}</td>
+                        <td className="px-8 py-5 text-right">
+                          <div className={cn(
+                            "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-black italic",
+                            adj.diff > 0 ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-600"
+                          )}>
+                            {adj.diff > 0 ? '+' : ''}{adj.diff}
+                            {adj.diff > 0 ? <CheckCircle2 className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="p-8 border-t border-slate-100 flex gap-4 bg-slate-50/30">
+                <button
+                  onClick={() => setIsImportModalOpen(false)}
+                  className="flex-1 py-4 bg-white border border-slate-200 text-slate-600 font-bold rounded-2xl hover:bg-slate-50 transition-all uppercase text-[11px] tracking-widest active:scale-[0.98]"
+                >
+                  Cancel & Discard
+                </button>
+                <button
+                  onClick={applyBatchAdjustments}
+                  disabled={isSubmitting}
+                  className="flex-[2] py-4 bg-indigo-600 text-white font-black rounded-2xl hover:bg-indigo-700 shadow-xl shadow-indigo-100 transition-all flex items-center justify-center gap-3 uppercase text-[11px] tracking-widest active:scale-[0.98] disabled:opacity-50"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      Applying Changes...
+                    </>
+                  ) : (
+                    <>
+                      Confirm {adjustments.length} Adjustments
+                      <ArrowRight className="w-4 h-4" />
+                    </>
+                  )}
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
