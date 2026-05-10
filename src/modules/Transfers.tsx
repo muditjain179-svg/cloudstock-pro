@@ -34,7 +34,8 @@ import {
   User,
   Download,
   Package as PackageIcon,
-  ArrowRightLeft
+  ArrowRightLeft,
+  Eye
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateTransferPDF, generateWhatsAppLink, cn } from '../lib/utils';
@@ -71,6 +72,7 @@ const Transfers: React.FC = () => {
   const [showFinalizeOverlay, setShowFinalizeOverlay] = useState(false);
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [lastFinalizedBill, setLastFinalizedBill] = useState<Bill | null>(null);
+  const [viewingBill, setViewingBill] = useState<Bill | null>(null);
   const [billDate, setBillDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const hasRestored = useRef(false);
   const addItemButtonRef = useRef<HTMLButtonElement>(null);
@@ -1231,6 +1233,13 @@ const Transfers: React.FC = () => {
               ) : (
                 <>
                   <button 
+                    onClick={() => setViewingBill(bill)} 
+                    className="p-2 text-gray-400 hover:text-indigo-600 hover:bg-slate-50 rounded-lg transition-colors"
+                    title="View Transfer"
+                  >
+                    <Eye className="w-4 h-4" />
+                  </button>
+                  <button 
                     onClick={() => downloadTransferPDF(bill)} 
                     className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
                     title="Download Receipt"
@@ -1262,6 +1271,80 @@ const Transfers: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* View Transfer Modal */}
+      <AnimatePresence>
+        {viewingBill && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setViewingBill(null)} className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" />
+            <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl relative z-10 overflow-hidden flex flex-col max-h-[90vh]">
+              <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                <div>
+                  <h2 className="text-lg font-bold text-gray-900 tracking-tight">
+                    {(viewingBill.type === 'opening_stock' || viewingBill.type === 'opening-stock') ? 'Opening Stock Details' : 'Transfer Details'}
+                  </h2>
+                  <p className="text-xs text-slate-400">Record No: {viewingBill.billNumber}</p>
+                </div>
+                <button onClick={() => setViewingBill(null)} className="p-2 hover:bg-gray-200 rounded-full transition-colors"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="p-6 overflow-y-auto space-y-6">
+                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl">
+                  <div>
+                    <p className="text-[10px] uppercase font-bold text-slate-400">Salesman / Stockist</p>
+                    <p className="font-bold">{viewingBill.entityName}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase font-bold text-slate-400">Date</p>
+                    <p className="font-bold">{new Date(viewingBill.date.seconds * 1000).toLocaleDateString()}</p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase font-black text-slate-400 tracking-widest">Transferred Items</p>
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-100 text-slate-600">
+                      <tr>
+                        <th className="text-left p-2 rounded-l-lg">Item</th>
+                        <th className="text-left p-2">Brand</th>
+                        <th className="text-right p-2 rounded-r-lg">Qty</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {viewingBill.items.map((item, idx) => (
+                        <tr key={idx} className="border-b border-slate-50">
+                          <td className="p-2 font-medium">{item.name}</td>
+                          <td className="p-2">{(item as any).brand || '-'}</td>
+                          <td className="p-2 text-right font-bold text-indigo-600">{item.quantity}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="bg-amber-50 p-4 rounded-xl border border-amber-100 italic">
+                  <p className="text-[10px] text-amber-700 font-bold leading-relaxed">
+                    This transaction has been finalized and stock has been moved to the salesman's inventory.
+                  </p>
+                </div>
+              </div>
+              <div className="p-6 bg-slate-50 flex gap-3">
+                <button 
+                  onClick={() => downloadTransferPDF(viewingBill)}
+                  className="flex-1 py-3 bg-white border border-slate-200 text-slate-700 font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-slate-100"
+                >
+                   <Download className="w-4 h-4" /> Download PDF
+                </button>
+                <button 
+                  onClick={() => shareTransferPDF(viewingBill)}
+                  className="flex-1 py-3 bg-indigo-600 text-white font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-indigo-700"
+                >
+                   <Send className="w-4 h-4" /> Share Receipt
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

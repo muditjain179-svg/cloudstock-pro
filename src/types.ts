@@ -91,4 +91,6 @@ export interface StockAdjustment {
   adminName: string;
   timestamp: any;
   reason?: string;
+  targetSalesmanId?: string | null;
+  targetSalesmanName?: string | null;
 }

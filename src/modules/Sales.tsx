@@ -42,7 +42,8 @@ import {
   ShoppingCart,
   UserPlus,
   Download,
-  ExternalLink
+  ExternalLink,
+  Eye
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { formatCurrency, generateInvoicePDF, generateWhatsAppLink, cn } from '../lib/utils';
@@ -97,7 +98,7 @@ const Sales: React.FC = () => {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [currentTab, setCurrentTab] = useState<'active' | 'drafts'>('active');
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
-  const [viewingDraft, setViewingDraft] = useState<Bill | null>(null);
+  const [viewingBill, setViewingBill] = useState<Bill | null>(null);
   const [isFinalizing, setIsFinalizing] = useState<Bill | null>(null);
   const [inventoryLoaded, setInventoryLoaded] = useState(false);
   const hasRestored = useRef(false);
@@ -1673,6 +1674,13 @@ const Sales: React.FC = () => {
                       Print / Share
                     </button>
                     <button 
+                      onClick={() => setViewingBill(bill)}
+                      className="p-2.5 bg-slate-50 text-slate-400 hover:text-indigo-600 rounded-xl transition-colors"
+                      title="View Bill"
+                    >
+                      <Eye className="w-4 h-4" />
+                    </button>
+                    <button 
                       onClick={() => handleDownloadBill(bill)}
                       className="p-2.5 bg-slate-50 text-slate-400 hover:text-indigo-600 rounded-xl transition-colors"
                       title="Download PDF"
@@ -1756,10 +1764,11 @@ const Sales: React.FC = () => {
                 ) : (
                   <>
                     <button 
-                      onClick={() => setViewingDraft(bill)}
-                      className="px-3 py-2 bg-slate-50 text-slate-600 rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-slate-100"
+                      onClick={() => setViewingBill(bill)}
+                      className="p-2 bg-slate-50 text-slate-400 hover:text-amber-600 rounded-lg transition-colors"
+                      title="View Draft"
                     >
-                      View
+                      <Eye className="w-4 h-4" />
                     </button>
                     <button 
                       onClick={() => handleEditDraft(bill)}
@@ -1792,32 +1801,34 @@ const Sales: React.FC = () => {
         </div>
       )}
 
-      {/* View Draft Modal */}
+      {/* View Bill Modal (Used for both Drafts and Finalized) */}
       <AnimatePresence>
-        {viewingDraft && (
+        {viewingBill && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setViewingDraft(null)} className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setViewingBill(null)} className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" />
             <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl relative z-10 overflow-hidden flex flex-col max-h-[90vh]">
-              <div className="bg-amber-50 p-3 text-center border-b border-amber-100">
-                <p className="text-[10px] font-black text-amber-700 uppercase tracking-[0.2em]">This is a Draft Bill — not yet finalized</p>
-              </div>
+              {viewingBill.status === 'draft' && (
+                <div className="bg-amber-50 p-3 text-center border-b border-amber-100">
+                  <p className="text-[10px] font-black text-amber-700 uppercase tracking-[0.2em]">This is a Draft Bill — not yet finalized</p>
+                </div>
+              )}
               <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
                 <div>
-                  <h2 className="text-lg font-bold text-gray-900 tracking-tight">Draft Details</h2>
-                  <p className="text-xs text-slate-400">Bill No: {viewingDraft.billNumber}</p>
+                  <h2 className="text-lg font-bold text-gray-900 tracking-tight">{viewingBill.status === 'finalized' ? 'Bill Details' : 'Draft Details'}</h2>
+                  <p className="text-xs text-slate-400">Bill No: {viewingBill.billNumber}</p>
                 </div>
-                <button onClick={() => setViewingDraft(null)} className="p-2 hover:bg-gray-200 rounded-full transition-colors"><X className="w-5 h-5" /></button>
+                <button onClick={() => setViewingBill(null)} className="p-2 hover:bg-gray-200 rounded-full transition-colors"><X className="w-5 h-5" /></button>
               </div>
               <div className="p-6 overflow-y-auto space-y-6">
                 <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl">
                   <div>
                     <p className="text-[10px] uppercase font-bold text-slate-400">Customer</p>
-                    <p className="font-bold">{viewingDraft.entityName}</p>
-                    <p className="text-xs text-slate-500">{viewingDraft.entityPhone}</p>
+                    <p className="font-bold">{viewingBill.entityName}</p>
+                    <p className="text-xs text-slate-500">{viewingBill.entityPhone}</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-[10px] uppercase font-bold text-slate-400">Draft Date</p>
-                    <p className="font-bold">{new Date(viewingDraft.date.seconds * 1000).toLocaleDateString()}</p>
+                    <p className="text-[10px] uppercase font-bold text-slate-400">Date</p>
+                    <p className="font-bold">{new Date(viewingBill.date.seconds * 1000).toLocaleDateString()}</p>
                   </div>
                 </div>
 
@@ -1833,7 +1844,7 @@ const Sales: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {viewingDraft.items.map((item, idx) => (
+                      {viewingBill.items.map((item, idx) => (
                         <tr key={idx} className="border-b border-slate-50">
                           <td className="p-2 font-medium">{item.name}</td>
                           <td className="p-2 text-center">{item.quantity}</td>
@@ -1848,39 +1859,58 @@ const Sales: React.FC = () => {
                 <div className="space-y-2 pt-2">
                   <div className="flex justify-between text-slate-500">
                     <span>Subtotal</span>
-                    <span>{formatCurrency(viewingDraft.subtotal)}</span>
+                    <span>{formatCurrency(viewingBill.subtotal)}</span>
                   </div>
                   <div className="flex justify-between text-slate-500">
                     <span>Old Due</span>
-                    <span>{formatCurrency(viewingDraft.oldDue)}</span>
+                    <span>{formatCurrency(viewingBill.oldDue)}</span>
                   </div>
                   <div className="flex justify-between items-center py-3 border-t border-b border-slate-100">
                     <span className="font-bold text-slate-900">Grand Total</span>
-                    <span className="text-xl font-black text-slate-900">{formatCurrency(viewingDraft.totalAmount)}</span>
+                    <span className="text-xl font-black text-slate-900">{formatCurrency(viewingBill.totalAmount)}</span>
                   </div>
                   <div className="flex justify-between text-emerald-600 font-bold">
                     <span>Receipts</span>
-                    <span>-{formatCurrency(viewingDraft.receivedAmount || 0)}</span>
+                    <span>-{formatCurrency(viewingBill.receivedAmount || 0)}</span>
                   </div>
                   <div className="flex justify-between items-center bg-slate-900 text-white p-4 rounded-xl mt-4">
                     <span className="text-xs uppercase font-bold tracking-widest text-slate-400">New Balance</span>
-                    <span className="text-xl font-black">{formatCurrency(viewingDraft.newBalance)}</span>
+                    <span className="text-xl font-black">{formatCurrency(viewingBill.newBalance)}</span>
                   </div>
                 </div>
               </div>
               <div className="p-6 bg-slate-50 flex gap-3">
-                <button 
-                  onClick={() => { setViewingDraft(null); handleEditDraft(viewingDraft); }}
-                  className="flex-1 py-3 bg-white border border-slate-200 text-slate-700 font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-slate-100"
-                >
-                   Edit Draft
-                </button>
-                <button 
-                  onClick={() => { setViewingDraft(null); setIsFinalizing(viewingDraft); }}
-                  className="flex-1 py-3 bg-emerald-600 text-white font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-emerald-700"
-                >
-                   Finalize Bill
-                </button>
+                {viewingBill.status === 'draft' ? (
+                  <>
+                    <button 
+                      onClick={() => { setViewingBill(null); handleEditDraft(viewingBill); }}
+                      className="flex-1 py-3 bg-white border border-slate-200 text-slate-700 font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-slate-100"
+                    >
+                       Edit Draft
+                    </button>
+                    <button 
+                      onClick={() => { setViewingBill(null); setIsFinalizing(viewingBill); }}
+                      className="flex-1 py-3 bg-emerald-600 text-white font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-emerald-700"
+                    >
+                       Finalize Bill
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button 
+                      onClick={() => handleDownloadBill(viewingBill)}
+                      className="flex-1 py-3 bg-white border border-slate-200 text-slate-700 font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-slate-100"
+                    >
+                       <Download className="w-4 h-4" /> Download PDF
+                    </button>
+                    <button 
+                      onClick={() => shareBillOnWhatsApp(viewingBill)}
+                      className="flex-1 py-3 bg-emerald-600 text-white font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-emerald-700"
+                    >
+                       <Send className="w-4 h-4" /> WhatsApp Share
+                    </button>
+                  </>
+                )}
               </div>
             </motion.div>
           </div>

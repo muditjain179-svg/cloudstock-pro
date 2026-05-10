@@ -351,26 +351,30 @@ const Inventory: React.FC = () => {
   };
 
   const handleExportExcel = () => {
-    // Generate data for all items, including ID (will be a hidden column if possible, but definitely included)
+    const isSalesmanStock = !!selectedSalesmanId;
+    const salesmanName = allSalesmen.find(s => s.id === selectedSalesmanId)?.name || '';
+    const stockColHeader = isSalesmanStock ? `Stock (${salesmanName})` : 'Current Main Stock';
+
+    // Generate data for all items, including ID
     const exportData = items.map(item => ({
       'Item ID': item.id,
       'Brand': item.brand || '-',
       'Item Name': item.name,
       'Category': item.category || '-',
       'Unit': item.unit || 'pcs',
-      'Current Main Stock': item.isExtra ? 'N/A' : (item.mainStock || 0)
+      [stockColHeader]: item.isExtra && !isSalesmanStock ? 'N/A' : (isSalesmanStock ? (salesmanInventory[item.id] || 0) : (item.mainStock || 0))
     }));
 
     const ws = XLSX.utils.json_to_sheet(exportData);
     
     // Set column widths
     const wscols = [
-      { wch: 15 }, // ID
+      { wch: 20 }, // ID
       { wch: 15 }, // Brand
       { wch: 30 }, // Name
       { wch: 20 }, // Category
       { wch: 10 }, // Unit
-      { wch: 20 }, // Stock
+      { wch: 25 }, // Stock
     ];
     ws['!cols'] = wscols;
 
@@ -379,7 +383,8 @@ const Inventory: React.FC = () => {
     
     // Generate and download
     const date = new Date().toISOString().split('T')[0];
-    XLSX.writeFile(wb, `Inventory_Check_${date}.xlsx`);
+    const fileName = isSalesmanStock ? `Stock_Check_${salesmanName.replace(/\s+/g, '_')}_${date}.xlsx` : `Inventory_Check_${date}.xlsx`;
+    XLSX.writeFile(wb, fileName);
   };
 
   const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -403,18 +408,32 @@ const Inventory: React.FC = () => {
         const ws = wb.Sheets[wsname];
         const data = XLSX.utils.sheet_to_json<any>(ws);
 
+        if (data.length === 0) {
+          setSubmissionError("The Excel file is empty.");
+          return;
+        }
+
         const newAdjustments: Array<{ item: Item, oldQty: number, newQty: number, diff: number }> = [];
+        
+        // Find the stock column (flexibly)
+        const stockColumn = Object.keys(data[0]).find(k => k.toLowerCase().includes('stock'));
+
+        if (!stockColumn) {
+          setSubmissionError("Could not find a 'Stock' column in the Excel file.");
+          return;
+        }
 
         data.forEach(row => {
           const itemId = row['Item ID'];
-          const newQtyStr = row['Current Main Stock'];
+          const newQtyStr = row[stockColumn];
           
           if (!itemId || newQtyStr === 'N/A' || isNaN(Number(newQtyStr))) return;
 
           const item = items.find(i => i.id === itemId);
-          if (item && !item.isExtra) {
-            const newQty = Number(newQtyStr);
-            const oldQty = item.mainStock || 0;
+          if (item) {
+            const newQty = Math.max(0, Number(newQtyStr));
+            const oldQty = selectedSalesmanId ? (salesmanInventory[item.id] || 0) : (item.mainStock || 0);
+            
             if (newQty !== oldQty) {
               newAdjustments.push({
                 item,
@@ -467,16 +486,31 @@ const Inventory: React.FC = () => {
     setIsSubmitting(true);
     const batch = writeBatch(db);
     const pathsAffected: string[] = [];
+    const isSalesmanStock = !!selectedSalesmanId;
+    const salesmanName = allSalesmen.find(s => s.id === selectedSalesmanId)?.name || '';
 
     try {
       adjustments.forEach(adj => {
-        // Update item stock
-        const itemPath = `items/${adj.item.id}`;
-        const itemRef = doc(db, itemPath);
-        pathsAffected.push(itemPath);
-        batch.update(itemRef, {
-          mainStock: adj.newQty
-        });
+        if (isSalesmanStock) {
+          // Update salesman inventory
+          const path = `inventories/${selectedSalesmanId}/items/${adj.item.id}`;
+          const ref = doc(db, path);
+          pathsAffected.push(path);
+          batch.set(ref, {
+            id: adj.item.id,
+            name: adj.item.name,
+            quantity: adj.newQty,
+            updatedAt: serverTimestamp()
+          }, { merge: true });
+        } else {
+          // Update item main stock
+          const itemPath = `items/${adj.item.id}`;
+          const itemRef = doc(db, itemPath);
+          pathsAffected.push(itemPath);
+          batch.update(itemRef, {
+            mainStock: adj.newQty
+          });
+        }
 
         // Log adjustment
         const logPath = `stock_adjustments/${doc(collection(db, 'stock_adjustments')).id}`;
@@ -491,7 +525,9 @@ const Inventory: React.FC = () => {
           difference: adj.diff,
           adjustedBy: user.id,
           adminName: user.name,
-          timestamp: serverTimestamp()
+          timestamp: serverTimestamp(),
+          targetSalesmanId: selectedSalesmanId || null,
+          targetSalesmanName: salesmanName || null
         };
         batch.set(logRef, logData);
       });
@@ -510,7 +546,6 @@ const Inventory: React.FC = () => {
         try {
           handleFirestoreError(err, 'write', pathsAffected.join(', '));
         } catch (diagErr) {
-          // Keep the cleaner message for UI but log detail to console
           console.error("Permission Diagnosis:", diagErr);
         }
       }
