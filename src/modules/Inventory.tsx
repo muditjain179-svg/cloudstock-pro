@@ -70,6 +70,7 @@ const Inventory: React.FC = () => {
   const [isModalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [showToast, setShowToast] = useState(false);
+  const [toastMessage, setToastMessage] = useState({ title: '', message: '', type: 'success' as 'success' | 'error' });
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deleteItemId, setDeleteItemId] = useState<string | null>(null);
@@ -242,8 +243,13 @@ const Inventory: React.FC = () => {
 
       if (addNext && !editingItem) {
         // Show success toast
+        setToastMessage({
+          title: 'Item Created',
+          message: `${formData.name} has been added to inventory.`,
+          type: 'success'
+        });
         setShowToast(true);
-        setTimeout(() => setShowToast(false), 2000);
+        setTimeout(() => setShowToast(false), 3000);
         
         // Reset form but keep category and brand
         setFormData({
@@ -259,6 +265,14 @@ const Inventory: React.FC = () => {
           nameInputRef.current?.focus();
         }, 100);
       } else {
+        setToastMessage({
+          title: editingItem ? 'Item Updated' : 'Item Created',
+          message: `${formData.name} has been ${editingItem ? 'updated' : 'created'} successfully.`,
+          type: 'success'
+        });
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 3000);
+        
         setModalOpen(false);
         setEditingItem(null);
         setFormData({ 
@@ -340,6 +354,11 @@ const Inventory: React.FC = () => {
       setShowConvertModal(false);
       setItemToConvert(null);
       setConvertOpeningStock('');
+      setToastMessage({
+        title: 'Item Converted',
+        message: `${itemToConvert.name} is now a Main Inventory item.`,
+        type: 'success'
+      });
       setShowToast(true);
       setTimeout(() => setShowToast(false), 3000);
     } catch (error) {
@@ -446,8 +465,12 @@ const Inventory: React.FC = () => {
         });
 
         if (newAdjustments.length === 0) {
-          setSubmissionError("No stock differences found in the uploaded file.");
-          setTimeout(() => setSubmissionError(null), 3000);
+          setToastMessage({
+            title: 'No Changes Detected',
+            message: 'All items in your Excel file already match the current database stock levels.',
+            type: 'success' // Using green because it's "all good"
+          });
+          setShowToast(true);
           return;
         }
 
@@ -536,8 +559,13 @@ const Inventory: React.FC = () => {
       
       setIsImportModalOpen(false);
       setAdjustments([]);
+      setToastMessage({
+        title: 'Inventory Synced',
+        message: `Successfully applied ${adjustments.length} adjustments to the database.`,
+        type: 'success'
+      });
       setShowToast(true);
-      setTimeout(() => setShowToast(false), 3000);
+      setTimeout(() => setShowToast(false), 5000);
     } catch (err: any) {
       console.error("Batch update failed:", err);
       let errorMsg = err.message;
@@ -869,13 +897,67 @@ const Inventory: React.FC = () => {
   if (itemsLoading) return <div>Loading inventory...</div>;
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-500">
+    <div className="space-y-6 animate-in fade-in duration-500 relative">
+      {/* Toast Notification */}
+      <AnimatePresence>
+        {showToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -20, x: '-50%' }}
+            animate={{ opacity: 1, y: 20, x: '-50%' }}
+            exit={{ opacity: 0, y: -20, x: '-50%' }}
+            className="fixed top-4 left-1/2 z-[200] w-full max-w-md"
+          >
+            <div className={cn(
+              "px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-4 border",
+              toastMessage.type === 'success' ? "bg-white border-emerald-100" : "bg-white border-red-100"
+            )}>
+              <div className={cn(
+                "w-10 h-10 rounded-xl flex items-center justify-center shrink-0",
+                toastMessage.type === 'success' ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600"
+              )}>
+                {toastMessage.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+              </div>
+              <div className="flex-1">
+                <h4 className="text-sm font-black text-slate-900 uppercase tracking-tight">{toastMessage.title}</h4>
+                <p className="text-xs text-slate-500 font-medium">{toastMessage.message}</p>
+              </div>
+              <button onClick={() => setShowToast(false)} className="p-1 hover:bg-slate-50 rounded-lg text-slate-300 transition-colors">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Main Error Bar */}
+      <AnimatePresence>
+        {submissionError && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="bg-red-50 border border-red-100 rounded-xl p-4 flex items-center gap-4"
+          >
+            <div className="w-10 h-10 bg-red-100 text-red-600 rounded-xl flex items-center justify-center shrink-0">
+              <AlertCircle className="w-5 h-5" />
+            </div>
+            <div className="flex-1">
+              <h4 className="text-sm font-black text-red-900 uppercase tracking-tight">Operation Failed</h4>
+              <p className="text-xs text-red-600 font-medium">{submissionError}</p>
+            </div>
+            <button onClick={() => setSubmissionError(null)} className="p-2 hover:bg-red-100 text-red-400 rounded-lg transition-colors">
+              <X className="w-5 h-5" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Tab Selection */}
-      <div className="flex p-1 bg-gray-100 rounded-xl w-fit border border-gray-200">
+      <div className="flex p-1 bg-gray-100 rounded-xl w-full sm:w-fit border border-gray-200 overflow-x-auto no-scrollbar">
         <button
           onClick={() => setActiveTab('main')}
           className={cn(
-            "px-6 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all",
+            "flex-1 sm:flex-none px-4 sm:px-6 py-2 rounded-lg text-[10px] sm:text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap",
             activeTab === 'main' ? "bg-white text-indigo-600 shadow-sm border border-gray-200" : "text-gray-500 hover:text-gray-700"
           )}
         >
@@ -884,7 +966,7 @@ const Inventory: React.FC = () => {
         <button
           onClick={() => setActiveTab('extras')}
           className={cn(
-            "px-6 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all",
+            "flex-1 sm:flex-none px-4 sm:px-6 py-2 rounded-lg text-[10px] sm:text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap",
             activeTab === 'extras' ? "bg-white text-amber-600 shadow-sm border border-gray-200" : "text-gray-500 hover:text-gray-700"
           )}
         >
@@ -903,8 +985,8 @@ const Inventory: React.FC = () => {
             {user?.role === 'admin' ? 'Real-time stock levels and catalog' : 'Items currently in your possession'}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="flex bg-gray-100 p-1 rounded-lg border border-gray-200">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex bg-gray-100 p-1 rounded-lg border border-gray-200 shrink-0">
             <button
               onClick={() => setShowLowStockOnly(false)}
               className={cn(
@@ -926,69 +1008,72 @@ const Inventory: React.FC = () => {
           </div>
           <button 
             onClick={generateStockSummaryPDF}
-            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded text-xs font-bold hover:bg-indigo-700 transition-colors shadow-sm"
+            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded text-xs font-bold hover:bg-indigo-700 transition-colors shadow-sm flex-1 sm:flex-none justify-center whitespace-nowrap"
           >
             <Share2 className="w-4 h-4" />
             STOCK SUMMARY
           </button>
           {user?.role === 'admin' && (
-            <React.Fragment>
+            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+              {/* Database Tools */}
               <button 
                 onClick={() => setShowExcelTools(!showExcelTools)}
                 className={cn(
-                  "p-2 rounded-lg transition-all duration-300",
-                  showExcelTools ? "bg-slate-100 text-slate-600 rotate-180" : "text-slate-300 hover:text-slate-400"
+                  "p-2 rounded-lg transition-all duration-300 bg-slate-100 text-slate-600",
+                  showExcelTools ? "rotate-180" : "text-slate-400"
                 )}
                 title="Advanced Database Tools"
               >
                 <Database className="w-4 h-4" />
               </button>
 
-              {showExcelTools && (
-                <motion.div 
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  className="flex items-center gap-2"
-                >
-                  <div className="h-8 w-[1px] bg-gray-200 mx-1 hidden sm:block" />
-                  <button 
-                    onClick={handleExportExcel}
-                    className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded text-xs font-bold hover:bg-slate-50 transition-colors shadow-sm"
-                    title="Export current inventory to Excel for verification"
+              <AnimatePresence>
+                {showExcelTools && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.95 }}
+                    className="flex flex-wrap items-center gap-2 w-full sm:w-auto"
                   >
-                    <FileDown className="w-4 h-4 text-emerald-600" />
-                    EXPORT EXCEL
-                  </button>
-                  <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded text-xs font-bold hover:bg-slate-50 transition-colors shadow-sm cursor-pointer" title="Upload corrected Excel to sync stock">
-                    <FileUp className="w-4 h-4 text-indigo-600" />
-                    IMPORT ADJUSTED
-                    <input 
-                      type="file" 
-                      accept=".xlsx, .xls" 
-                      onChange={handleFileImport}
-                      className="hidden" 
-                    />
-                  </label>
-                </motion.div>
-              )}
-              <div className="h-8 w-[1px] bg-gray-200 mx-1 hidden sm:block" />
+                    <button 
+                      onClick={handleExportExcel}
+                      className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded text-xs font-bold hover:bg-slate-50 transition-colors shadow-sm flex-1 sm:flex-none justify-center whitespace-nowrap"
+                      title="Export current inventory to Excel for verification"
+                    >
+                      <FileDown className="w-4 h-4 text-emerald-600" />
+                      EXPORT EXCEL
+                    </button>
+                    <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded text-xs font-bold hover:bg-slate-50 transition-colors shadow-sm cursor-pointer flex-1 sm:flex-none justify-center whitespace-nowrap" title="Upload corrected Excel to sync stock">
+                      <FileUp className="w-4 h-4 text-indigo-600" />
+                      IMPORT ADJUSTED
+                      <input 
+                        type="file" 
+                        accept=".xlsx, .xls" 
+                        onChange={handleFileImport}
+                        className="hidden" 
+                      />
+                    </label>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              
               <button 
                 onClick={() => {
-                setEditingItem(null);
-                setFormData({ name: '', category: '', brand: '', openingBalance: '' as any, lowStockThreshold: 5 });
-                setModalOpen(true);
-              }}
-              className={cn(
-                "flex items-center gap-2 px-4 py-2 text-white rounded text-xs font-bold transition-colors shadow-sm",
-                activeTab === 'extras' ? "bg-amber-600 hover:bg-amber-700" : "bg-blue-600 hover:bg-blue-700"
-              )}
-            >
-              <Plus className="w-4 h-4" />
-              {activeTab === 'extras' ? 'ADD NEW EXTRA ITEM' : 'ADD NEW ITEM'}
-            </button>
-          </React.Fragment>
-        )}
-      </div>
+                  setEditingItem(null);
+                  setFormData({ name: '', category: '', brand: '', openingBalance: '' as any, lowStockThreshold: 5 });
+                  setModalOpen(true);
+                }}
+                className={cn(
+                  "flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 text-white rounded text-xs font-bold transition-colors shadow-sm whitespace-nowrap",
+                  activeTab === 'extras' ? "bg-amber-600 hover:bg-amber-700" : "bg-blue-600 hover:bg-blue-700"
+                )}
+              >
+                <Plus className="w-4 h-4" />
+                {activeTab === 'extras' ? 'ADD NEW EXTRA ITEM' : 'ADD NEW ITEM'}
+              </button>
+            </div>
+          )}
+        </div>
     </div>
 
       {/* Search & Filter */}

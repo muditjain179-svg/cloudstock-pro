@@ -22,7 +22,9 @@ import {
   DocumentSnapshot
 } from 'firebase/firestore';
 import Fuse from 'fuse.js';
+import { initializeApp } from 'firebase/app';
 import { db, handleFirestoreError } from '../lib/firebase';
+import { recordFlow, updateFlowStatus } from '../lib/flowService';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppData } from '../lib/useAppData';
 import { Bill, Item, Customer, BillItem, BillStatus } from '../types';
@@ -101,6 +103,14 @@ const Sales: React.FC = () => {
   const [viewingBill, setViewingBill] = useState<Bill | null>(null);
   const [isFinalizing, setIsFinalizing] = useState<Bill | null>(null);
   const [inventoryLoaded, setInventoryLoaded] = useState(false);
+  
+  // Search and Filter State
+  const [billSearch, setBillSearch] = useState('');
+  const [dateFilter, setDateFilter] = useState({
+    start: '',
+    end: ''
+  });
+
   const hasRestored = useRef(false);
   const addItemButtonRef = useRef<HTMLButtonElement>(null);
   const inStockItems = useMemo(() => {
@@ -141,6 +151,56 @@ const Sales: React.FC = () => {
       (c.phone && c.phone.includes(q))
     );
   }, [customerSearch, customers]);
+
+  const filteredActiveBills = useMemo(() => {
+    return activeBills.filter(bill => {
+      const searchMatch = !billSearch || 
+        bill.billNumber.toLowerCase().includes(billSearch.toLowerCase()) ||
+        bill.entityName.toLowerCase().includes(billSearch.toLowerCase());
+      
+      const billDate = new Date(bill.date.seconds * 1000);
+      billDate.setHours(0,0,0,0);
+      
+      let dateMatch = true;
+      if (dateFilter.start) {
+        const start = new Date(dateFilter.start);
+        start.setHours(0,0,0,0);
+        dateMatch = dateMatch && billDate >= start;
+      }
+      if (dateFilter.end) {
+        const end = new Date(dateFilter.end);
+        end.setHours(0,0,0,0);
+        dateMatch = dateMatch && billDate <= end;
+      }
+      
+      return searchMatch && dateMatch;
+    });
+  }, [activeBills, billSearch, dateFilter]);
+
+  const filteredDraftBills = useMemo(() => {
+    return draftBills.filter(bill => {
+      const searchMatch = !billSearch || 
+        bill.billNumber.toLowerCase().includes(billSearch.toLowerCase()) ||
+        bill.entityName.toLowerCase().includes(billSearch.toLowerCase());
+      
+      const billDate = new Date(bill.date.seconds * 1000);
+      billDate.setHours(0,0,0,0);
+      
+      let dateMatch = true;
+      if (dateFilter.start) {
+        const start = new Date(dateFilter.start);
+        start.setHours(0,0,0,0);
+        dateMatch = dateMatch && billDate >= start;
+      }
+      if (dateFilter.end) {
+        const end = new Date(dateFilter.end);
+        end.setHours(0,0,0,0);
+        dateMatch = dateMatch && billDate <= end;
+      }
+      
+      return searchMatch && dateMatch;
+    });
+  }, [draftBills, billSearch, dateFilter]);
 
   const billsLoadedRef = useRef(false);
   const userId = user?.id;
@@ -566,25 +626,61 @@ const Sales: React.FC = () => {
 
       const batch = writeBatch(db);
 
-      // 2. Perform Batch Operations
+      // Record Flow (independent move records) - CONNECT DIRECTLY TO DB
+      const flowIds: string[] = [];
       for (const billItem of billToFinalize.items) {
-        if (user!.role === 'salesman') {
-          const invRef = doc(db, `inventories/${user!.id}/items`, billItem.itemId);
-          batch.update(invRef, { quantity: increment(-billItem.quantity) });
-        } else if (!billItem.isExtra) {
-          const itemRef = doc(db, 'items', billItem.itemId);
-          batch.update(itemRef, { mainStock: increment(-billItem.quantity) });
+        try {
+          const fId = await recordFlow({
+            type: 'sale',
+            action: 'OUT',
+            itemName: billItem.name,
+            itemId: billItem.itemId,
+            quantity: billItem.quantity,
+            entityName: billToFinalize.entityName,
+            inventory: user?.role === 'salesman' ? `Staff: ${user.name}` : 'Main Store',
+            createdBy: user?.id || 'unknown',
+            creatorName: user?.name,
+            billNumber: billToFinalize.billNumber,
+            status: 'pending'
+          });
+          if (fId) flowIds.push(fId);
+        } catch (e) {
+          console.error("Direct flow recording failed:", e);
         }
       }
 
-      const billRef = doc(db, 'bills', billToFinalize.id);
-      batch.update(billRef, { 
-        status: 'finalized',
-        date: Timestamp.now(),
-        updatedAt: serverTimestamp()
-      });
+      try {
+        // 2. Perform Batch Operations
+        for (const billItem of billToFinalize.items) {
+          if (user!.role === 'salesman') {
+            const invRef = doc(db, `inventories/${user!.id}/items`, billItem.itemId);
+            batch.update(invRef, { quantity: increment(-billItem.quantity) });
+          } else if (!billItem.isExtra) {
+            const itemRef = doc(db, 'items', billItem.itemId);
+            batch.update(itemRef, { mainStock: increment(-billItem.quantity) });
+          }
+        }
 
-      await batch.commit();
+        const billRef = doc(db, 'bills', billToFinalize.id);
+        batch.update(billRef, { 
+          status: 'finalized',
+          date: Timestamp.now(),
+          updatedAt: serverTimestamp()
+        });
+
+        await batch.commit();
+
+        // Update flow status to success
+        for (const fid of flowIds) {
+          updateFlowStatus(fid, 'success');
+        }
+      } catch (error: any) {
+        // Update flow status to failed
+        for (const fid of flowIds) {
+          updateFlowStatus(fid, 'failed', error.message || 'Batch commit failed');
+        }
+        throw error; // Re-throw to be handled by handleAsyncAction
+      }
       
       setLastSubmission({ hash: currentBillHash, time: Date.now() });
 
@@ -739,57 +835,100 @@ const Sales: React.FC = () => {
 
       const batch = writeBatch(db);
 
+      // Record Flow (independent move records) - CONNECT DIRECTLY TO DB
+      const flowIds: string[] = [];
+      const billNum = editingDraftId ? draftBills.find(d => d.id === editingDraftId)?.billNumber : `S-${Date.now().toString().slice(-6)}`;
+      
       if (status === 'finalized') {
         for (const billItem of billData.items) {
-          if (user!.role === 'salesman') {
-            const invRef = doc(db, `inventories/${user!.id}/items`, billItem.itemId);
-            batch.update(invRef, { quantity: increment(-billItem.quantity) });
-          } else if (!billItem.isExtra) {
-            const itemRef = doc(db, 'items', billItem.itemId);
-            batch.update(itemRef, { mainStock: increment(-billItem.quantity) });
+          try {
+            const fId = await recordFlow({
+              type: 'sale',
+              action: 'OUT',
+              itemName: billItem.name,
+              itemId: billItem.itemId,
+              quantity: Number(billItem.quantity),
+              entityName: billData.customer!.name,
+              inventory: user?.role === 'salesman' ? `Staff: ${user.name}` : 'Main Store',
+              createdBy: user?.id || 'unknown',
+              creatorName: user?.name,
+              billNumber: billNum!,
+              status: 'pending'
+            });
+            if (fId) flowIds.push(fId);
+          } catch (e) {
+            console.error("Direct flow recording failed:", e);
           }
         }
       }
 
-      const billId = editingDraftId || crypto.randomUUID();
-      const billRef = doc(db, 'bills', billId);
-      const subtotalValue = calculateSubtotal();
-      const grandTotalValue = calculateGrandTotal();
-      const newBalanceValue = calculateNewBalance();
+      let billRef: any;
+      let billPayload: any;
 
-      const selectedDate = new Date(billDate);
-      const now = new Date();
-      selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
+      try {
+        if (status === 'finalized') {
+          for (const billItem of billData.items) {
+            if (user!.role === 'salesman') {
+              const invRef = doc(db, `inventories/${user!.id}/items`, billItem.itemId);
+              batch.update(invRef, { quantity: increment(-billItem.quantity) });
+            } else if (!billItem.isExtra) {
+              const itemRef = doc(db, 'items', billItem.itemId);
+              batch.update(itemRef, { mainStock: increment(-billItem.quantity) });
+            }
+          }
+        }
 
-      const billPayload: any = {
-        billNumber: editingDraftId ? draftBills.find(d => d.id === editingDraftId)?.billNumber : `S-${Date.now().toString().slice(-6)}`,
-        type: 'sale',
-        date: Timestamp.fromDate(selectedDate),
-        entityId: billData.customer!.id,
-        entityName: billData.customer!.name,
-        entityPhone: billData.customer!.phone,
-        items: billData.items.map(i => ({
-          ...i,
-          brand: i.brand || items.find(item => item.id === i.itemId)?.brand || '',
-          quantity: Number(i.quantity),
-          price: Number(i.price)
-        })),
-        subtotal: subtotalValue,
-        oldDue: Number(billData.oldDue || 0),
-        totalAmount: grandTotalValue,
-        receivedAmount: Number(billData.receivedAmount || 0),
-        newBalance: newBalanceValue,
-        createdBy: user!.id,
-        status,
-        updatedAt: serverTimestamp()
-      };
-      
-      if (!editingDraftId) {
-        billPayload.createdAt = serverTimestamp();
+        const billId = editingDraftId || crypto.randomUUID();
+        billRef = doc(db, 'bills', billId);
+        const subtotalValue = calculateSubtotal();
+        const grandTotalValue = calculateGrandTotal();
+        const newBalanceValue = calculateNewBalance();
+
+        const selectedDate = new Date(billDate);
+        const now = new Date();
+        selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
+
+        billPayload = {
+          billNumber: billNum,
+          type: 'sale',
+          date: Timestamp.fromDate(selectedDate),
+          entityId: billData.customer!.id,
+          entityName: billData.customer!.name,
+          entityPhone: billData.customer!.phone,
+          items: billData.items.map(i => ({
+            ...i,
+            brand: i.brand || items.find(item => item.id === i.itemId)?.brand || '',
+            quantity: Number(i.quantity),
+            price: Number(i.price)
+          })),
+          subtotal: subtotalValue,
+          oldDue: Number(billData.oldDue || 0),
+          totalAmount: grandTotalValue,
+          receivedAmount: Number(billData.receivedAmount || 0),
+          newBalance: newBalanceValue,
+          createdBy: user!.id,
+          status,
+          updatedAt: serverTimestamp()
+        };
+        
+        if (!editingDraftId) {
+          billPayload.createdAt = serverTimestamp();
+        }
+        
+        batch.set(billRef, billPayload, { merge: true });
+        await batch.commit();
+
+        // Update flow status to success
+        for (const fid of flowIds) {
+          updateFlowStatus(fid, 'success');
+        }
+      } catch (error: any) {
+        // Update flow status to failed
+        for (const fid of flowIds) {
+          updateFlowStatus(fid, 'failed', error.message || 'Batch commit failed');
+        }
+        throw error;
       }
-      
-      batch.set(billRef, billPayload, { merge: true });
-      await batch.commit();
       
       setLastSubmission({ hash: currentBillHash, time: Date.now() });
 
@@ -1622,9 +1761,52 @@ const Sales: React.FC = () => {
         </div>
       </div>
 
+      {/* Search and Filters Bar */}
+      <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm flex flex-col md:flex-row gap-4">
+        <div className="flex-1 relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+          <input
+            type="text"
+            placeholder="Search by Bill Number or Customer..."
+            className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none text-sm transition-all"
+            value={billSearch}
+            onChange={(e) => setBillSearch(e.target.value)}
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] uppercase font-black text-slate-400 tracking-widest">From</span>
+            <input
+              type="date"
+              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:border-indigo-500 outline-none"
+              value={dateFilter.start}
+              onChange={(e) => setDateFilter(prev => ({ ...prev, start: e.target.value }))}
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] uppercase font-black text-slate-400 tracking-widest">To</span>
+            <input
+              type="date"
+              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:border-indigo-500 outline-none"
+              value={dateFilter.end}
+              onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))}
+            />
+          </div>
+          {(billSearch || dateFilter.start || dateFilter.end) && (
+            <button 
+              onClick={() => { setBillSearch(''); setDateFilter({ start: '', end: '' }); }}
+              className="p-2 text-slate-400 hover:text-rose-500 transition-colors"
+              title="Clear Filters"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
       {currentTab === 'active' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {activeBills.map((bill) => (
+          {filteredActiveBills.map((bill) => (
             <motion.div 
               layout
               key={bill.id} 
@@ -1721,7 +1903,7 @@ const Sales: React.FC = () => {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {draftBills.map((bill) => (
+          {filteredDraftBills.map((bill) => (
             <motion.div 
               layout
               key={bill.id} 

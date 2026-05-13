@@ -5,12 +5,14 @@ import {
   where, 
   orderBy, 
   onSnapshot,
-  Timestamp 
+  Timestamp,
+  getDocs,
+  limit
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppData } from '../lib/useAppData';
-import { Bill, Item, UserProfile } from '../types';
+import { Bill, Item, UserProfile, FlowRecord as BaseFlowRecord } from '../types';
 import { 
   ArrowUpRight, 
   ArrowDownLeft, 
@@ -22,25 +24,14 @@ import {
   Package,
   Activity,
   ChevronRight,
-  ArrowRightLeft
+  ArrowRightLeft,
+  AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 
-interface FlowRecord {
-  id: string;
+interface FlowRecord extends Omit<BaseFlowRecord, 'date'> {
   date: Date;
-  type: 'sale' | 'purchase' | 'transfer' | 'opening_stock';
-  action: 'IN' | 'OUT';
-  itemName: string;
-  itemId: string;
-  quantity: number;
-  entityName: string;
-  inventory: string;
-  createdBy: string;
-  creatorName?: string;
-  billNumber: string;
-  brand?: string;
 }
 
 const Flow: React.FC = () => {
@@ -49,12 +40,34 @@ const Flow: React.FC = () => {
   const { data: staff } = useAppData<UserProfile>('users', []);
   
   const [bills, setBills] = useState<Bill[]>([]);
+  const [directFlows, setDirectFlows] = useState<BaseFlowRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState<string>('all');
   const [filterInventory, setFilterInventory] = useState<string>('all');
   const [dateRange, setDateRange] = useState<'today' | '7days' | '30days' | 'all'>('7days');
 
+  // Fetch Direct Flows (The new robust way)
+  useEffect(() => {
+    if (!user) return;
+    
+    const flowsQ = query(
+      collection(db, 'flows'),
+      orderBy('date', 'desc'),
+      limit(500)
+    );
+
+    const unsub = onSnapshot(flowsQ, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as BaseFlowRecord));
+      setDirectFlows(data);
+    }, (error) => {
+      console.error("Direct flows listener error:", error);
+    });
+
+    return unsub;
+  }, [user]);
+
+  // Fetch Bills (The traditional derived way for past data)
   useEffect(() => {
     if (!user) return;
     
@@ -62,7 +75,8 @@ const Flow: React.FC = () => {
     const billsQ = query(
       collection(db, 'bills'),
       where('status', '==', 'finalized'),
-      orderBy('date', 'desc')
+      orderBy('date', 'desc'),
+      limit(200) // Avoid overwhelming for historical sync
     );
 
     const unsub = onSnapshot(billsQ, (snapshot) => {
@@ -78,8 +92,9 @@ const Flow: React.FC = () => {
   }, [user]);
 
   const flowRecords = useMemo(() => {
-    const records: FlowRecord[] = [];
+    const recordsMap = new Map<string, FlowRecord>();
     
+    // 1. Process legacy bills into map
     bills.forEach(bill => {
       bill.items.forEach((item, idx) => {
         const creator = staff.find(s => s.id === bill.createdBy);
@@ -88,41 +103,45 @@ const Flow: React.FC = () => {
         // Define flow logic based on transaction type
         if (bill.type === 'sale') {
           const invSource = creator?.role === 'admin' ? 'Main Store' : `Staff: ${creator?.name || 'Unknown'}`;
-          records.push({
-            id: `${bill.id}-${idx}-out`,
+          const id = `bill-${bill.id}-${idx}-out`;
+          recordsMap.set(id, {
+            id,
             date: bill.date instanceof Timestamp ? bill.date.toDate() : new Date(bill.date),
             type: 'sale',
             action: 'OUT',
             itemName: item.name,
             itemId: item.itemId,
             quantity: item.quantity,
-            entityName: bill.entityName, // Customer
+            entityName: bill.entityName,
             inventory: invSource,
             createdBy: bill.createdBy,
             creatorName: creator?.name || 'Unknown',
             billNumber: bill.billNumber,
-            brand: (item as any).brand || itemInfo?.brand || '-'
+            brand: (item as any).brand || itemInfo?.brand || '-',
+            status: 'success'
           });
         } else if (bill.type === 'purchase') {
-          records.push({
-            id: `${bill.id}-${idx}-in`,
+          const id = `bill-${bill.id}-${idx}-in`;
+          recordsMap.set(id, {
+            id,
             date: bill.date instanceof Timestamp ? bill.date.toDate() : new Date(bill.date),
             type: 'purchase',
             action: 'IN',
             itemName: item.name,
             itemId: item.itemId,
             quantity: item.quantity,
-            entityName: bill.entityName, // Supplier
+            entityName: bill.entityName,
             inventory: 'Main Store',
             createdBy: bill.createdBy,
             creatorName: creator?.name || 'Unknown',
             billNumber: bill.billNumber,
-            brand: (item as any).brand || itemInfo?.brand || '-'
+            brand: (item as any).brand || itemInfo?.brand || '-',
+            status: 'success'
           });
         } else if (bill.type === 'transfer') {
-          // Transfer is OUT from Main Store
-          records.push({
-            id: `${bill.id}-${idx}-tout`,
+          const outId = `bill-${bill.id}-${idx}-tout`;
+          recordsMap.set(outId, {
+            id: outId,
             date: bill.date instanceof Timestamp ? bill.date.toDate() : new Date(bill.date),
             type: 'transfer',
             action: 'OUT',
@@ -134,11 +153,12 @@ const Flow: React.FC = () => {
             createdBy: bill.createdBy,
             creatorName: creator?.name || 'Unknown',
             billNumber: bill.billNumber,
-            brand: (item as any).brand || itemInfo?.brand || '-'
+            brand: (item as any).brand || itemInfo?.brand || '-',
+            status: 'success'
           });
-          // AND IN to Salesman
-          records.push({
-            id: `${bill.id}-${idx}-tin`,
+          const inId = `bill-${bill.id}-${idx}-tin`;
+          recordsMap.set(inId, {
+            id: inId,
             date: bill.date instanceof Timestamp ? bill.date.toDate() : new Date(bill.date),
             type: 'transfer',
             action: 'IN',
@@ -150,11 +170,13 @@ const Flow: React.FC = () => {
             createdBy: bill.createdBy,
             creatorName: creator?.name || 'Unknown',
             billNumber: bill.billNumber,
-            brand: (item as any).brand || itemInfo?.brand || '-'
+            brand: (item as any).brand || itemInfo?.brand || '-',
+            status: 'success'
           });
         } else if (bill.type === 'opening_stock' || (bill as any).type === 'opening-stock') {
-          records.push({
-            id: `${bill.id}-${idx}-osin`,
+          const id = `bill-${bill.id}-${idx}-osin`;
+          recordsMap.set(id, {
+            id,
             date: bill.date instanceof Timestamp ? bill.date.toDate() : new Date(bill.date),
             type: 'opening_stock',
             action: 'IN',
@@ -166,14 +188,33 @@ const Flow: React.FC = () => {
             createdBy: bill.createdBy,
             creatorName: creator?.name || 'Unknown',
             billNumber: bill.billNumber,
-            brand: (item as any).brand || itemInfo?.brand || '-'
+            brand: (item as any).brand || itemInfo?.brand || '-',
+            status: 'success'
           });
         }
       });
     });
 
-    return records;
-  }, [bills, items, staff]);
+    // 2. Overlay Direct Flows (De-duplicate or Add)
+    directFlows.forEach(df => {
+      const dedupKey = `${df.billNumber}-${df.itemId}-${df.action}`;
+      
+      // If we find a derived record with the same dedupKey, remove it first
+      for (const [key, value] of recordsMap.entries()) {
+        const itemMoveKey = `${(value as any).billNumber}-${value.itemId}-${value.action}`;
+        if (itemMoveKey === dedupKey) {
+          recordsMap.delete(key);
+        }
+      }
+
+      recordsMap.set(df.id, {
+        ...df,
+        date: df.date instanceof Timestamp ? df.date.toDate() : new Date(df.date)
+      });
+    });
+
+    return Array.from(recordsMap.values()).sort((a, b) => b.date.getTime() - a.date.getTime());
+  }, [bills, directFlows, items, staff]);
 
   const filteredRecords = useMemo(() => {
     let result = flowRecords;
@@ -404,6 +445,20 @@ const Flow: React.FC = () => {
                 {/* Transaction Badge & Qty */}
                 <div className="flex items-center gap-4 min-w-[100px] justify-end ml-auto">
                   <div className="text-right">
+                    <div className="flex items-center justify-end gap-1 mb-1">
+                      {record.status === 'failed' && (
+                        <div className="flex items-center gap-0.5 text-rose-500" title={record.error}>
+                          <AlertTriangle className="w-2.5 h-2.5" />
+                          <span className="text-[7px] font-black uppercase">Failed</span>
+                        </div>
+                      )}
+                      {record.status === 'pending' && (
+                        <div className="flex items-center gap-0.5 text-amber-500 animate-pulse">
+                          <Clock className="w-2.5 h-2.5" />
+                          <span className="text-[7px] font-black uppercase">Pending</span>
+                        </div>
+                      )}
+                    </div>
                     <p className={cn(
                       "text-base font-black leading-none",
                       record.action === 'IN' ? "text-emerald-600" : "text-rose-600"

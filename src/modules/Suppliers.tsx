@@ -64,14 +64,14 @@ const Suppliers: React.FC = () => {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Supplier Library</h1>
-          <p className="text-xs text-gray-500 uppercase tracking-widest font-bold mt-1">Manage your suppliers for purchases</p>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900 tracking-tight">Supplier Library</h1>
+          <p className="text-[10px] sm:text-xs text-gray-500 uppercase tracking-widest font-bold mt-1">Manage your suppliers for purchases</p>
         </div>
         <button 
           onClick={() => { setEditingSupplier(null); setFormData({ name: '', phone: '' }); setModalOpen(true); }}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded text-xs font-bold hover:bg-blue-700 shadow-sm"
+          className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 text-white rounded text-xs font-bold hover:bg-blue-700 shadow-sm whitespace-nowrap"
         >
           <UserPlus className="w-4 h-4" />
           ADD NEW SUPPLIER

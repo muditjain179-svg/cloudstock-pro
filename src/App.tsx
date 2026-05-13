@@ -121,13 +121,16 @@ const MainLayout: React.FC = () => {
 
   return (
     <div className="min-h-screen flex bg-slate-50">
-      {/* Mobile Sidebar Toggle */}
-      <button 
-        onClick={() => setSidebarOpen(true)}
-        className="lg:hidden fixed top-4 left-4 z-50 p-2 bg-white rounded-lg shadow-md"
-      >
-        <Menu className="w-6 h-6" />
-      </button>
+      {/* Mobile Top Bar */}
+      <div className="lg:hidden fixed top-0 left-0 right-0 h-16 bg-white border-b border-gray-200 z-40 flex items-center px-4">
+        <button 
+          onClick={() => setSidebarOpen(true)}
+          className="p-2 -ml-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+        >
+          <Menu className="w-6 h-6" />
+        </button>
+        <span className="ml-2 font-bold text-gray-900 uppercase tracking-tight">CloudStock</span>
+      </div>
 
       {/* Sidebar Overlay */}
       <AnimatePresence>
@@ -214,7 +217,7 @@ const MainLayout: React.FC = () => {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 p-4 lg:p-8 overflow-auto">
+      <main className="flex-1 p-4 lg:p-8 pt-20 lg:pt-8 overflow-auto">
         <Suspense fallback={
           <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
             <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />

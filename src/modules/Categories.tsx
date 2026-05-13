@@ -65,14 +65,14 @@ const Categories: React.FC = () => {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Category Library</h1>
-          <p className="text-xs text-gray-500 uppercase tracking-widest font-bold mt-1">Organize your inventory with custom categories</p>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900 tracking-tight">Category Library</h1>
+          <p className="text-[10px] sm:text-xs text-gray-500 uppercase tracking-widest font-bold mt-1">Organize your inventory with custom categories</p>
         </div>
         <button 
           onClick={() => { setEditingCategory(null); setFormData({ name: '' }); setModalOpen(true); }}
-          className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded text-xs font-bold hover:bg-emerald-700 shadow-sm transition-all"
+          className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded text-xs font-bold hover:bg-emerald-700 shadow-sm transition-all whitespace-nowrap"
         >
           <PlusCircle className="w-4 h-4" />
           ADD NEW CATEGORY

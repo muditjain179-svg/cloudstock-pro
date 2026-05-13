@@ -80,6 +80,24 @@ export interface Bill {
   status: BillStatus;
 }
 
+export interface FlowRecord {
+  id: string;
+  date: any; // Timestamp
+  type: BillType;
+  action: 'IN' | 'OUT';
+  itemName: string;
+  itemId: string;
+  quantity: number;
+  entityName: string;
+  inventory: string;
+  createdBy: string;
+  creatorName?: string;
+  billNumber: string;
+  brand?: string;
+  status: 'pending' | 'success' | 'failed';
+  error?: string;
+}
+
 export interface StockAdjustment {
   id: string;
   itemId: string;

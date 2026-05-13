@@ -20,6 +20,7 @@ import {
 } from 'firebase/firestore';
 import Fuse from 'fuse.js';
 import { db, handleFirestoreError } from '../lib/firebase';
+import { recordFlow, updateFlowStatus } from '../lib/flowService';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppData } from '../lib/useAppData';
 import { Bill, Item, UserProfile, BillItem, Brand, Category } from '../types';
@@ -35,7 +36,8 @@ import {
   Download,
   Package as PackageIcon,
   ArrowRightLeft,
-  Eye
+  Eye,
+  ArrowLeft
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateTransferPDF, generateWhatsAppLink, cn } from '../lib/utils';
@@ -74,6 +76,14 @@ const Transfers: React.FC = () => {
   const [lastFinalizedBill, setLastFinalizedBill] = useState<Bill | null>(null);
   const [viewingBill, setViewingBill] = useState<Bill | null>(null);
   const [billDate, setBillDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  
+  // Search and Filter State
+  const [billSearch, setBillSearch] = useState('');
+  const [dateFilter, setDateFilter] = useState({
+    start: '',
+    end: ''
+  });
+
   const hasRestored = useRef(false);
   const addItemButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -106,6 +116,31 @@ const Transfers: React.FC = () => {
     if (!itemSearch.trim()) return baseItems;
     return itemFuse.search(itemSearch).map(result => result.item);
   }, [itemSearch, itemFuse, items, isOpeningStock]);
+
+  const filteredBills = useMemo(() => {
+    return bills.filter(bill => {
+      const searchMatch = !billSearch || 
+        bill.billNumber.toLowerCase().includes(billSearch.toLowerCase()) ||
+        bill.entityName.toLowerCase().includes(billSearch.toLowerCase());
+      
+      const billDateStr = new Date(bill.date.seconds * 1000);
+      billDateStr.setHours(0,0,0,0);
+      
+      let dateMatch = true;
+      if (dateFilter.start) {
+        const start = new Date(dateFilter.start);
+        start.setHours(0,0,0,0);
+        dateMatch = dateMatch && billDateStr >= start;
+      }
+      if (dateFilter.end) {
+        const end = new Date(dateFilter.end);
+        end.setHours(0,0,0,0);
+        dateMatch = dateMatch && billDateStr <= end;
+      }
+      
+      return searchMatch && dateMatch;
+    });
+  }, [bills, billSearch, dateFilter]);
 
   const billsLoadedRef = useRef(false);
   const userId = user?.id;
@@ -381,61 +416,121 @@ const Transfers: React.FC = () => {
 
       const batch = writeBatch(db);
 
-      // Writes
-      for (const update of itemUpdates) {
-        batch.update(update.ref, { 
-          mainStock: increment(-update.qty),
-          updatedAt: serverTimestamp()
-        });
-      }
-      for (const update of salesmanUpdates) {
-        const payload: any = { 
-          quantity: increment(update.qty),
-          lastUpdated: serverTimestamp()
-        };
-        
-        if (update.isExtra) payload.isExtra = true;
+      // Record Flow (independent move records) - CONNECT DIRECTLY TO DB
+      const flowIds: string[] = [];
+      const billNum = `${isOpeningStock ? 'OS' : 'T'}-${Date.now().toString().slice(-6)}`;
+      
+      for (const billItem of billData.items) {
+        try {
+          if (!isOpeningStock) {
+            // OUT from Main Store
+            const fIdOut = await recordFlow({
+              type: 'transfer',
+              action: 'OUT',
+              itemName: billItem.name,
+              itemId: billItem.itemId,
+              quantity: billItem.quantity,
+              entityName: `Transfer to ${billData.salesman!.name}`,
+              inventory: 'Main Store',
+              createdBy: user!.id,
+              creatorName: user?.name,
+              billNumber: billNum,
+              status: 'pending'
+            });
+            if (fIdOut) flowIds.push(fIdOut);
+          }
 
-        if (isOpeningStock) {
-          payload.itemId = update.itemId;
-          payload.itemName = update.itemName;
-          payload.brand = update.brand;
-          payload.openingStock = increment(update.qty);
-          payload.addedAt = serverTimestamp();
+          // IN to Salesman
+          const fIdIn = await recordFlow({
+            type: isOpeningStock ? 'opening_stock' : 'transfer',
+            action: 'IN',
+            itemName: billItem.name,
+            itemId: billItem.itemId,
+            quantity: billItem.quantity,
+            entityName: isOpeningStock ? 'Initial Setup' : `Transfer from Main Store`,
+            inventory: `Staff: ${billData.salesman!.name}`,
+            createdBy: user!.id,
+            creatorName: user?.name,
+            billNumber: billNum,
+            status: 'pending'
+          });
+          if (fIdIn) flowIds.push(fIdIn);
+        } catch (e) {
+          console.error("Direct flow recording failed:", e);
+        }
+      }
+
+      let newBillRef: any;
+      let billPayload: any;
+
+      try {
+        // Writes
+        for (const update of itemUpdates) {
+          batch.update(update.ref, { 
+            mainStock: increment(-update.qty),
+            updatedAt: serverTimestamp()
+          });
+        }
+        for (const update of salesmanUpdates) {
+          const payload: any = { 
+            quantity: increment(update.qty),
+            lastUpdated: serverTimestamp()
+          };
+          
+          if (update.isExtra) payload.isExtra = true;
+
+          if (isOpeningStock) {
+            payload.itemId = update.itemId;
+            payload.itemName = update.itemName;
+            payload.brand = update.brand;
+            payload.openingStock = increment(update.qty);
+            payload.addedAt = serverTimestamp();
+          }
+
+          batch.set(update.ref, payload, { merge: true });
         }
 
-        batch.set(update.ref, payload, { merge: true });
+        const newBillId = crypto.randomUUID();
+        newBillRef = doc(db, 'bills', newBillId);
+
+        const selectedDate = new Date(billDate);
+        const now = new Date();
+        selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
+
+        billPayload = {
+          billNumber: billNum,
+          type: isOpeningStock ? 'opening_stock' as const : 'transfer' as const,
+          date: Timestamp.fromDate(selectedDate),
+          entityId: billData.salesman!.id,
+          entityName: billData.salesman!.name,
+          items: billData.items,
+          totalAmount: 0,
+          subtotal: 0,
+          oldDue: 0,
+          receivedAmount: 0,
+          newBalance: 0,
+          createdBy: user.id,
+          status: 'finalized' as const,
+          newItemCreated: billData.items.some(i => (i as any).newItemCreated),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        };
+        
+        batch.set(newBillRef, billPayload);
+        
+        await batch.commit();
+
+        // Update flow status to success
+        for (const fid of flowIds) {
+          updateFlowStatus(fid, 'success');
+        }
+      } catch (error: any) {
+        // Update flow status to failed
+        for (const fid of flowIds) {
+          updateFlowStatus(fid, 'failed', error.message || 'Batch commit failed');
+        }
+        throw error;
       }
-
-      const newBillId = crypto.randomUUID();
-      const newBillRef = doc(db, 'bills', newBillId);
-
-      const selectedDate = new Date(billDate);
-      const now = new Date();
-      selectedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
-
-      const billPayload = {
-        billNumber: `${isOpeningStock ? 'OS' : 'T'}-${Date.now().toString().slice(-6)}`,
-        type: isOpeningStock ? 'opening_stock' as const : 'transfer' as const,
-        date: Timestamp.fromDate(selectedDate),
-        entityId: billData.salesman!.id,
-        entityName: billData.salesman!.name,
-        items: billData.items,
-        totalAmount: 0,
-        subtotal: 0,
-        oldDue: 0,
-        receivedAmount: 0,
-        newBalance: 0,
-        createdBy: user.id,
-        status: 'finalized' as const,
-        newItemCreated: billData.items.some(i => (i as any).newItemCreated),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      };
-      
-      batch.set(newBillRef, billPayload);
-      
-      await batch.commit();
 
       setLastSubmission({ hash: currentBillHash, time: Date.now() });
       
@@ -710,11 +805,12 @@ const Transfers: React.FC = () => {
         <div className="flex items-center gap-4">
           <button 
             onClick={resetForm} 
-            className="p-2 hover:bg-slate-200 rounded-full transition-colors"
+            className="flex items-center gap-2 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg transition-colors text-xs font-bold"
           >
-            <X />
+            <ArrowLeft className="w-4 h-4" />
+            BACK
           </button>
-          <h1 className="text-2xl font-bold">{isOpeningStock ? 'Add Opening Stock' : 'New Stock Transfer'}</h1>
+          <h1 className="text-lg sm:text-2xl font-bold truncate">{isOpeningStock ? 'Add Opening Stock' : 'New Stock Transfer'}</h1>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -1166,22 +1262,22 @@ const Transfers: React.FC = () => {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Stock Transfers</h1>
           <p className="text-xs text-gray-500 uppercase tracking-widest font-bold mt-1">Movement from main inventory to salesmen</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button 
             onClick={() => { setIsOpeningStock(true); setIsCreating(true); }} 
-            className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded text-xs font-bold hover:bg-indigo-700 shadow-sm"
+            className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 bg-indigo-600 text-white rounded text-[10px] sm:text-xs font-bold hover:bg-indigo-700 shadow-sm whitespace-nowrap"
           >
             <PackageIcon className="w-4 h-4" /> 
             OPENING STOCK
           </button>
           <button 
             onClick={() => { setIsOpeningStock(false); setIsCreating(true); }} 
-            className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded text-xs font-bold hover:bg-blue-700 shadow-sm"
+            className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 text-white rounded text-[10px] sm:text-xs font-bold hover:bg-blue-700 shadow-sm whitespace-nowrap"
           >
             <Plus className="w-4 h-4" /> 
             NEW TRANSFER
@@ -1189,8 +1285,51 @@ const Transfers: React.FC = () => {
         </div>
       </div>
 
+      {/* Search and Filters Bar */}
+      <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm flex flex-col md:flex-row gap-4">
+        <div className="flex-1 relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+          <input
+            type="text"
+            placeholder="Search by Bill Number or Salesman..."
+            className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:border-indigo-500 outline-none text-sm transition-all"
+            value={billSearch}
+            onChange={(e) => setBillSearch(e.target.value)}
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] uppercase font-black text-slate-400 tracking-widest">From</span>
+            <input
+              type="date"
+              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:border-indigo-500 outline-none"
+              value={dateFilter.start}
+              onChange={(e) => setDateFilter(prev => ({ ...prev, start: e.target.value }))}
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] uppercase font-black text-slate-400 tracking-widest">To</span>
+            <input
+              type="date"
+              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:border-indigo-500 outline-none"
+              value={dateFilter.end}
+              onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))}
+            />
+          </div>
+          {(billSearch || dateFilter.start || dateFilter.end) && (
+            <button 
+              onClick={() => { setBillSearch(''); setDateFilter({ start: '', end: '' }); }}
+              className="p-2 text-slate-400 hover:text-rose-500 transition-colors"
+              title="Clear Filters"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
       <div className="space-y-4">
-        {bills.map(bill => (
+        {filteredBills.map(bill => (
           <div key={bill.id} className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex items-center justify-between group">
             <div className="flex items-center gap-4">
               <div className={cn(
@@ -1200,10 +1339,12 @@ const Transfers: React.FC = () => {
                 {(bill.type === 'opening_stock' || bill.type === 'opening-stock') ? <PackageIcon className="w-5 h-5" /> : <ArrowRightLeft className="w-5 h-5" />}
               </div>
               <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="font-bold text-gray-900 truncate">#{bill.billNumber} to {bill.entityName}</h3>
+                <div className="flex flex-col min-w-0">
+                  <h3 className="font-bold text-gray-900 text-sm sm:text-base leading-tight break-words">
+                    #{bill.billNumber} to {bill.entityName}
+                  </h3>
                   {(bill.type === 'opening_stock' || bill.type === 'opening-stock') && (
-                    <span className="text-[7px] px-1 py-0.5 bg-indigo-50 text-indigo-600 border border-indigo-100 rounded font-black tracking-widest uppercase">Opening Stock</span>
+                    <span className="w-fit mt-1 text-[7px] px-1 py-0.5 bg-indigo-50 text-indigo-600 border border-indigo-100 rounded font-black tracking-widest uppercase">Opening Stock</span>
                   )}
                 </div>
                 <p className="text-[10px] text-gray-500 uppercase font-bold tracking-tight">
